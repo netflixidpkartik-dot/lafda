@@ -41,10 +41,6 @@ logger = logging.getLogger(__name__)
 
 print("Tecxo Bot Free Version Started. 🚀")
 
-# Define desired bio and name suffix
-DESIRED_BIO = "Free Automated ads via @TecxoAdsBot | powered by: @Tecxo | @TecxoChat"
-NAME_SUFFIX = "•via @TecxoAdsbot"
-
 # Initialize encryption key with persistence
 ENCRYPTION_KEY = getattr(config, 'ENCRYPTION_KEY', None)
 KEY_FILE = 'encryption.key'
@@ -243,26 +239,6 @@ async def run_broadcast(client, uid):
                         cached_groups.append((dialog.id, dialog.name))
                 group_cache[acc['_id']] = cached_groups
                 
-                me = await tg_client.get_me()
-                about = getattr(me, 'about', None) or ""
-                if about != DESIRED_BIO:
-                    try:
-                        await tg_client(functions.account.UpdateProfileRequest(
-                            about=DESIRED_BIO
-                        ))
-                        logger.info(f"Updated bio for account {acc['phone_number']}")
-                    except Exception as e:
-                        logger.warning(f"Failed to update bio for {acc['phone_number']}: {e}")
-                
-                # Always set last name to NAME_SUFFIX, clearing existing
-                try:
-                    await tg_client(functions.account.UpdateProfileRequest(
-                        last_name=NAME_SUFFIX
-                    ))
-                    logger.info(f"Updated last name for account {acc['phone_number']} to {NAME_SUFFIX}")
-                except Exception as e:
-                    logger.warning(f"Failed to update last name for {acc['phone_number']}: {e}")
-                
                 clients[acc['_id']] = tg_client
             except Exception as e:
                 logger.error(f"Failed to start client for {acc['phone_number']}: {e}")
@@ -452,8 +428,7 @@ async def otp_callback(client, cb):
                 await cb.message.edit_caption(
                     f"<blockquote><b>Account Successfully added!✅</b></blockquote>\n\n"
                     f"Phone: <code>{phone}</code>\n"
-                    "╰_╯Your account is ready for broadcasting!\n"
-                    "<b>Note: Profile bio and name will be updated during the first broadcast, you change it if you want.</b>",
+                    "╰_╯Your account is ready for broadcasting!",
                     parse_mode=ParseMode.HTML,
                     reply_markup=kb([[InlineKeyboardButton("Dashboard 🚪", callback_data="menu_main")]])
                 )
@@ -570,7 +545,7 @@ async def menu_main(client, cb):
         
         dashboard_caption = (
             f"<blockquote><b>╰_╯ @Tecxo Ads DASHBOARD</b></blockquote>\n\n"
-            f"•Hosted Accounts: <code>{accounts_count}/5</code>\n"
+            f"•Hosted Accounts: <code>{accounts_count}</code>\n"
             f"•Ad Message: {ad_msg_status}\n"
             f"•Cycle Interval: {current_delay}s\n"
             f"•Advertising Status: <b>{broadcast_status}</b>\n\n"
@@ -621,21 +596,6 @@ async def host_account(client, cb):
         return
     
     accounts_count = db.get_user_accounts_count(uid)
-    limit = user.get("accounts_limit", 5)
-    if isinstance(limit, str):
-        if limit.lower() == "unlimited":
-            limit = 999
-            logger.info(f"User {uid} has 'Unlimited' accounts_limit, setting to {limit}")
-        else:
-            try:
-                limit = int(limit)
-            except (TypeError, ValueError):
-                logger.error(f"Invalid accounts_limit for user {uid}: {limit}. Defaulting to 5")
-                limit = 5
-    
-    if not is_owner(uid) and accounts_count >= limit:
-        await cb.answer(f"Account limit reached ({accounts_count}/{limit}) Use @AdsReachbot to increase limit.", show_alert=True)
-        return
     
     try:
         db.set_user_state(uid, "telethon_wait_phone")
@@ -1249,14 +1209,10 @@ async def start(client, m):
         await m.reply_photo(
             photo=config.START_IMAGE,
             caption=f"""<blockquote>╰_╯ Welcome to <b>@Tecxo Free Ads bot</b> — The Future of Telegram Automation </blockquote>\n\n"""
-                    f"• Premium Ad Broadcasting\n• Smart Delays\n• Multi-Account Support</b>\n\n"
+                    f"• Premium Ad Broadcasting\n• Smart Delays\n• Multi-Account Support\n\n"
                     f"For support contact: @{config.ADMIN_USERNAME}",
             reply_markup=kb([
-                [InlineKeyboardButton("Dashboard", callback_data="menu_main")],
-                [InlineKeyboardButton("Updates", url=config.UPDATES_CHANNEL_URL),
-                 InlineKeyboardButton("Support", url=config.SUPPORT_GROUP_URL)],
-                [InlineKeyboardButton("How To Use", url=config.GUIDE_URL)],
-                [InlineKeyboardButton("Powered by", url=config.PRIVACY_POLICY_URL)]
+                [InlineKeyboardButton("Dashboard", callback_data="menu_main")]
             ]),
             parse_mode=ParseMode.HTML
         )
@@ -1475,8 +1431,7 @@ async def handle_text_message(client, m):
             await m.reply(
                 f"<blockquote><b>╰_╯Account added!✅ </b></blockquote>\n\n"
                 f"<u>Phone:</u> <code>{phone}</code>\n"
-                "•Account is ready for broadcasting!\n\n\n"
-                "<b>Note: Profile bio and name will be updated during the first broadcast you can change it later.</b>",
+                "•Account is ready for broadcasting!",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb([[InlineKeyboardButton("Dashboard", callback_data="menu_main")]])
             )
@@ -1518,4 +1473,3 @@ async def main():
 
 if __name__ == "__main__":
     pyro.run(main())
-
