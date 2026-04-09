@@ -544,7 +544,7 @@ async def menu_main(client, cb):
         broadcast_status = "Running 🚀" if running else "Paused ⏸️"
         
         dashboard_caption = (
-            f"<blockquote><b>╰_╯ @Tecxo Ads DASHBOARD</b></blockquote>\n\n"
+            f"<blockquote><b>╰_╯ ADS DASHBOARD</b></blockquote>\n\n"
             f"•Hosted Accounts: <code>{accounts_count}</code>\n"
             f"•Ad Message: {ad_msg_status}\n"
             f"•Cycle Interval: {current_delay}s\n"
@@ -566,21 +566,14 @@ async def menu_main(client, cb):
         ]
         
         try:
-            await cb.message.edit_media(
-                media=InputMediaPhoto(
-                    media=config.START_IMAGE,
-                    caption=dashboard_caption,
-                    parse_mode=ParseMode.HTML
-                ),
-                reply_markup=kb(menu)
-            )
-        except Exception as e:
-            logger.error(f"Error editing media in menu_main: {e}")
-            await cb.message.edit_caption(
-                caption=dashboard_caption,
+            await cb.message.edit_text(
+                text=dashboard_caption,
                 reply_markup=kb(menu),
                 parse_mode=ParseMode.HTML
             )
+        except Exception as e:
+            logger.error(f"Error editing message in menu_main: {e}")
+            await cb.answer("Error loading dashboard. Try /start.", show_alert=True)
         logger.info(f"Menu main accessed by user {uid}, callback_data: {cb.data}")
     except Exception as e:
         logger.error(f"Error in menu_main for user {uid}: {e}")
