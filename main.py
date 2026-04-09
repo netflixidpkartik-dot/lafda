@@ -126,7 +126,7 @@ async def logger_start(client, m):
         db.db.users.update_one({"user_id": uid}, {"$set": {"accounts_limit": "unlimited"}})
     db.set_logger_status(uid, is_active=True)
     await m.reply(
-        f"<b>╰_╯Welcome to Tecxo Logger Bot! </b>\n\n"
+        f"<b>╰_╯Welcome to Adbot Logger Bot! </b>\n\n"
         f"Logs for your ad broadcasts will be sent here.\n"
         f"Start the main bot (@{config.BOT_USERNAME.lstrip('@')}) to begin broadcasting! 🌟",
         parse_mode=ParseMode.HTML
