@@ -42,7 +42,7 @@ PRIVATE_CHANNEL_INVITE = ""
 ENCRYPTION_KEY = "uJ4XPKoW-bK-5J_bB1PjesbA1DDhBvsql-SEV4Qhmzw="
 
 # Database Configuration  ← APNA_PASSWORD_DAALO ki jagah apna MongoDB password daalo
-MONGO_URI = "mongodb+srv://kartikx17:wwweeerrr@cluster0.pm7gb82.mongodb.net/?appName=Cluster0"
+MONGO_URI = "mongodb+srv://kartikx17:wwweeerrr@cluster0.pm7gb82.mongodb.net/?appName=Cluster0&tls=true&tlsAllowInvalidCertificates=true"
 DB_NAME = "adsbot_db"
 
 # Broadcast Settings
