@@ -34,7 +34,7 @@ class EnhancedDatabaseManager:
         retry_delay = 1
         for attempt in range(max_retries):
             try:
-                self.client = pymongo.MongoClient(config.MONGO_URI, serverSelectionTimeoutMS=5000)
+                self.client = pymongo.MongoClient(config.MONGO_URI, serverSelectionTimeoutMS=5000, tls=True, tlsAllowInvalidCertificates=True)
                 self.client.admin.command('ping')
                 self.db = self.client[config.DB_NAME]
                 logger.info("MongoDB initialized successfully")
