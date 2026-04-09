@@ -128,7 +128,7 @@ async def logger_start(client, m):
     await m.reply(
         f"<b>╰_╯Welcome to Adbot Logger Bot! </b>\n\n"
         f"Logs for your ad broadcasts will be sent here.\n"
-        f"Start the main bot (@{config.BOT_USERNAME.lstrip('@')}) to begin broadcasting! 🌟",
+        f"Start the main bot to begin broadcasting! 🌟",
         parse_mode=ParseMode.HTML
     )
     logger.info(f"Logger bot started by user {uid}")
