@@ -1,5 +1,6 @@
 import os
 import certifi
+import ssl
 
 os.makedirs("logs", exist_ok=True)
 import logging
@@ -33,11 +34,10 @@ class EnhancedDatabaseManager:
         retry_delay = 1
         for attempt in range(max_retries):
             try:
-                self.client = pymongo.MongoClient(
-                    config.MONGO_URI,
-                    serverSelectionTimeoutMS=5000,
-                    tlsCAFile=certifi.where()
-                )
+                ssl_ctx = ssl.create_default_context()
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = ssl.CERT_NONE
+                self.client = pymongo.MongoClient(config.MONGO_URI, serverSelectionTimeoutMS=5000, ssl_context=ssl_ctx)
                 self.client.admin.command('ping')
                 self.db = self.client[config.DB_NAME]
                 logger.info("MongoDB initialized successfully")
