@@ -1,51 +1,48 @@
 import os
 
 # Telegram API Credentials
-API_ID = 
-API_HASH = ""
-BOT_TOKEN = ""
-LOGGER_BOT_TOKEN = ""
+API_ID = 37827563
+API_HASH = "abca86f59db00e94244dd14df8259ff0"
+BOT_TOKEN = "8611853728:AAFvo4LCgJ2ps5CLkEuqACNCCfG-Ijrsatg"
+LOGGER_BOT_TOKEN = "8358380922:AAH0K338z_9nToZRj54Htg_3UHzpH0nFDOM"
 BOT_USERNAME = "TecxoAdsBot"
 BOT_NAME = "Tecxo Ads 🚀"
 LOGGER_BOT_USERNAME = "TecxoAds2bot"
 
 # Admin Settings
-ADMIN_ID = 5067554174
+ADMIN_ID = 8665539217
 ADMIN_USERNAME = "TecxoChat"
-ADMIN_IDS = [7671963315]
+ADMIN_IDS = [8665539217]
 
-# Image URLs #must change 
-START_IMAGE = "https://graph.org/file/9878e0f9785f390f5b5a3-2ae056edc4003b40e2.jpg" 
-BROADCAST_IMAGE = "https://graph.org/file/9878e0f9785f390f5b5a3-2ae056edc4003b40e2.jpg"
-FORCE_JOIN_IMAGE = "https://graph.org/file/9878e0f9785f390f5b5a3-2ae056edc4003b40e2.jpg"
+# Image URLs
+START_IMAGE = None
+BROADCAST_IMAGE = None
+FORCE_JOIN_IMAGE = None
 
 # Force Join Settings
-ENABLE_FORCE_JOIN = True
-MUST_JOIN_CHANNEL_ID = -1002036215454  # Updated to actual channel ID
-MUSTJOIN_GROUP_ID = -1002221607042    # Updated to actual group ID
-MUST_JOIN_CHANNEL_URL = "https://t.me/+AAVFZPpltJg2ZDNl"  # Channel invite link or can be use public link t.me/{username} 
-MUSTJOIN_GROUP_URL = "https://t.me/+jh5--7I9GRxiNjhl"    # Group invite link
+ENABLE_FORCE_JOIN = False
+MUST_JOIN_CHANNEL_ID = 0
+MUSTJOIN_GROUP_ID = 0
+MUST_JOIN_CHANNEL_URL = ""
+MUSTJOIN_GROUP_URL = ""
 
 # Channel and Group IDs
-SETUP_GROUP_ID = -1002945751584
-TECH_LOG_CHANNEL_ID = -1002945751584
-GROUP_ID = -1002221607042 # Private group chat ID for ad skipping
+SETUP_GROUP_ID = 0
+TECH_LOG_CHANNEL_ID = 0
+GROUP_ID = 0
 
 # External Links
-PRIVACY_POLICY_URL = "https://t.me/TecxoOrg"
-SUPPORT_GROUP_URL = "https://t.me/TecxoChat"
-UPDATES_CHANNEL_URL = "https://t.me/Tecxo"
-GUIDE_URL = "https://t.me/TecxoAds/6"  # guide channel bna k usme video upload krne k baad uska link change krdena 
-PRIVATE_CHANNEL_INVITE = "https://t.me/TecxoAds"
+PRIVACY_POLICY_URL = ""
+SUPPORT_GROUP_URL = ""
+UPDATES_CHANNEL_URL = ""
+GUIDE_URL = ""
+PRIVATE_CHANNEL_INVITE = ""
 
 # Encryption Key
-ENCRYPTION_KEY = "RnVa0xtPfK1pm3qu_POAvFI9qkSyISKFShE37_JSQ2w="
+ENCRYPTION_KEY = "uJ4XPKoW-bK-5J_bB1PjesbA1DDhBvsql-SEV4Qhmzw="
 
-# Database Configuration
-MONGO_URI = os.getenv(
-    "MONGO_URI",
-    ""  # use own dont use this one is confedintial
-)
+# Database Configuration  ← APNA_PASSWORD_DAALO ki jagah apna MongoDB password daalo
+MONGO_URI = "mongodb+srv://kartikx17:wwweeerrr@cluster0.pm7gb82.mongodb.net/?appName=Cluster0"
 DB_NAME = "adsbot_db"
 
 # Broadcast Settings
@@ -57,12 +54,12 @@ MAX_DELAY = 86400
 OTP_LENGTH = 5
 OTP_EXPIRY = 300
 
-# Logging Configuration
+# Logging
 LOG_LEVEL = "INFO"
 LOG_FILE = "logs/TecxoAds.log"
 
 # Feature Toggles
-ENABLE_FORCE_JOIN = True
+ENABLE_FORCE_JOIN = False
 ENABLE_OTP_VERIFICATION = True
 ENABLE_BROADCASTING = True
 ENABLE_ANALYTICS = True
@@ -73,7 +70,7 @@ SUCCESS_MESSAGES = {
     "otp_sent": "OTP sent to your phone number!",
     "broadcast_started": "Broadcast started successfully!",
     "broadcast_completed": "Broadcast completed successfully!",
-    "accounts_deleted": "All accounts deleted successfully!"  # Added for delete all accounts
+    "accounts_deleted": "All accounts deleted successfully!"
 }
 
 # Error Messages
