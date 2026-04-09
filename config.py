@@ -1,18 +1,18 @@
 import os
 
 # Telegram API Credentials
-API_ID = int(os.getenv("37827563", "0"))
-API_HASH = os.getenv("abca86f59db00e94244dd14df8259ff0", "")
-BOT_TOKEN = os.getenv("8611853728:AAFvo4LCgJ2ps5CLkEuqACNCCfG-Ijrsatg", "")
-LOGGER_BOT_TOKEN = os.getenv("8358380922:AAH0K338z_9nToZRj54Htg_3UHzpH0nFDOM", "")
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+LOGGER_BOT_TOKEN = os.getenv("LOGGER_BOT_TOKEN", "")
 BOT_USERNAME = "TecxoAdsBot"
 BOT_NAME = "Tecxo Ads 🚀"
 LOGGER_BOT_USERNAME = "TecxoAds2bot"
 
 # Admin Settings
-ADMIN_ID = int(os.getenv("8665539217", "0"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 ADMIN_USERNAME = "TecxoChat"
-ADMIN_IDS = [int(os.getenv("8665539217", "0"))]
+ADMIN_IDS = [int(os.getenv("ADMIN_ID", "0"))]
 
 # Image URLs
 START_IMAGE = "https://graph.org/file/9878e0f9785f390f5b5a3-2ae056edc4003b40e2.jpg"
@@ -39,10 +39,10 @@ GUIDE_URL = ""
 PRIVATE_CHANNEL_INVITE = ""
 
 # Encryption Key
-ENCRYPTION_KEY = os.getenv("uJ4XPKoW-bK-5J_bB1PjesbA1DDhBvsql-SEV4Qhmzw=", "")
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")
 
 # Database Configuration
-MONGO_URI = os.getenv("mongodb+srv://kartikx17:<wwweeerrr>@cluster0.pm7gb82.mongodb.net/?appName=Cluster0", "")
+MONGO_URI = os.getenv("MONGO_URI", "")
 DB_NAME = "adsbot_db"
 
 # Broadcast Settings
