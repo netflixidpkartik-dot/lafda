@@ -4,7 +4,7 @@ import string
 import re
 import json
 from datetime import datetime, timedelta
-from telethon import TelegramClient, functions, types
+from telethon import TelegramClient, functions, types, events
 from telethon.sessions import StringSession
 from telethon.errors import (
     SessionPasswordNeededError,
@@ -916,16 +916,157 @@ async def stop_broadcast(client, cb):
     await send_dm_log(uid, f"<b>╰_╯ Broadcast stopped!</b>")
     logger.info(f"Broadcast stopped via callback for user {uid}")
 
-@pyro.on_callback_query(filters.regex("auto_reply"))
+def auto_reply_menu_markup(uid):
+    """Build the auto reply menu keyboard."""
+    enabled = db.get_auto_reply_enabled(uid)
+    toggle_label = "🟢 ON — Disable" if enabled else "🔴 OFF — Enable"
+    return kb([
+        [InlineKeyboardButton("➕ Add Rule", callback_data="ar_add"),
+         InlineKeyboardButton("📋 My Rules", callback_data="ar_list")],
+        [InlineKeyboardButton(f"Toggle: {toggle_label}", callback_data="ar_toggle")],
+        [InlineKeyboardButton("Back 🔙", callback_data="menu_main")]
+    ])
+
+@pyro.on_callback_query(filters.regex("^auto_reply$"))
 async def auto_reply(client, cb):
     uid = cb.from_user.id
-    await cb.message.edit_caption(
-        caption="""<blockquote> <b>╰_╯AUTO REPLY FEATURE</b></blockquote>\n\n"""
-                """This feature is coming soon!\n"""
-                """Stay tuned for automated reply capabilities to enhance your campaigns. This feature is right now available in our @AdsReachbot""",
-        reply_markup=kb([[InlineKeyboardButton("Back", callback_data="menu_main")]]),
+    enabled = db.get_auto_reply_enabled(uid)
+    rules = db.get_auto_reply_rules(uid)
+    status = "🟢 Enabled" if enabled else "🔴 Disabled"
+    await cb.message.edit_text(
+        f"<blockquote><b>╰_╯ AUTO REPLY</b></blockquote>\n\n"
+        f"Status: <b>{status}</b>\n"
+        f"Rules saved: <code>{len(rules)}</code>\n\n"
+        "Auto-reply watches incoming messages on your hosted accounts and "
+        "replies automatically when a keyword is matched.",
+        reply_markup=auto_reply_menu_markup(uid),
         parse_mode=ParseMode.HTML
     )
+
+@pyro.on_callback_query(filters.regex("^ar_toggle$"))
+async def ar_toggle(client, cb):
+    uid = cb.from_user.id
+    current = db.get_auto_reply_enabled(uid)
+    db.set_auto_reply_enabled(uid, not current)
+    status = "🟢 Enabled" if not current else "🔴 Disabled"
+    await cb.answer(f"Auto-reply {status}", show_alert=False)
+    rules = db.get_auto_reply_rules(uid)
+    await cb.message.edit_text(
+        f"<blockquote><b>╰_╯ AUTO REPLY</b></blockquote>\n\n"
+        f"Status: <b>{status}</b>\n"
+        f"Rules saved: <code>{len(rules)}</code>\n\n"
+        "Auto-reply watches incoming messages on your hosted accounts and "
+        "replies automatically when a keyword is matched.",
+        reply_markup=auto_reply_menu_markup(uid),
+        parse_mode=ParseMode.HTML
+    )
+
+@pyro.on_callback_query(filters.regex("^ar_add$"))
+async def ar_add(client, cb):
+    uid = cb.from_user.id
+    db.set_user_state(uid, "ar_wait_keyword")
+    await cb.message.edit_text(
+        "<blockquote><b>╰_╯ ADD AUTO REPLY — Step 1/2</b></blockquote>\n\n"
+        "Send the <b>keyword</b> you want to trigger the reply.\n\n"
+        "<i>Example:</i> <code>price</code>\n"
+        "When someone sends a message containing this word, your reply will be sent automatically.",
+        reply_markup=kb([[InlineKeyboardButton("Cancel 🔙", callback_data="auto_reply")]]),
+        parse_mode=ParseMode.HTML
+    )
+
+@pyro.on_callback_query(filters.regex("^ar_list$"))
+async def ar_list(client, cb):
+    uid = cb.from_user.id
+    rules = db.get_auto_reply_rules(uid)
+    if not rules:
+        await cb.message.edit_text(
+            "<blockquote><b>╰_╯ MY AUTO REPLY RULES</b></blockquote>\n\n"
+            "No rules set yet. Use <b>Add Rule</b> to create one.",
+            reply_markup=kb([
+                [InlineKeyboardButton("➕ Add Rule", callback_data="ar_add")],
+                [InlineKeyboardButton("Back 🔙", callback_data="auto_reply")]
+            ]),
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    caption = "<blockquote><b>╰_╯ MY AUTO REPLY RULES</b></blockquote>\n\n"
+    buttons = []
+    for i, rule in enumerate(rules, 1):
+        kw = rule["keyword"]
+        reply_preview = rule["reply_text"][:30] + ("…" if len(rule["reply_text"]) > 30 else "")
+        caption += f"{i}. Keyword: <code>{kw}</code>\n   Reply: <i>{reply_preview}</i>\n\n"
+        buttons.append([InlineKeyboardButton(f"🗑 Delete: {kw}", callback_data=f"ar_del_{rule['_id']}")])
+    buttons.append([InlineKeyboardButton("Back 🔙", callback_data="auto_reply")])
+
+    await cb.message.edit_text(
+        caption,
+        reply_markup=kb(buttons),
+        parse_mode=ParseMode.HTML
+    )
+
+@pyro.on_callback_query(filters.regex("^ar_del_"))
+async def ar_delete(client, cb):
+    uid = cb.from_user.id
+    rule_id = cb.data.replace("ar_del_", "")
+    try:
+        db.delete_auto_reply_rule(uid, rule_id)
+        await cb.answer("Rule deleted ✅", show_alert=False)
+    except Exception as e:
+        await cb.answer(f"Error: {e}", show_alert=True)
+        return
+    # Refresh the list
+    rules = db.get_auto_reply_rules(uid)
+    if not rules:
+        await cb.message.edit_text(
+            "<blockquote><b>╰_╯ MY AUTO REPLY RULES</b></blockquote>\n\n"
+            "No rules left. Use <b>Add Rule</b> to create one.",
+            reply_markup=kb([
+                [InlineKeyboardButton("➕ Add Rule", callback_data="ar_add")],
+                [InlineKeyboardButton("Back 🔙", callback_data="auto_reply")]
+            ]),
+            parse_mode=ParseMode.HTML
+        )
+        return
+    caption = "<blockquote><b>╰_╯ MY AUTO REPLY RULES</b></blockquote>\n\n"
+    buttons = []
+    for i, rule in enumerate(rules, 1):
+        kw = rule["keyword"]
+        reply_preview = rule["reply_text"][:30] + ("…" if len(rule["reply_text"]) > 30 else "")
+        caption += f"{i}. Keyword: <code>{kw}</code>\n   Reply: <i>{reply_preview}</i>\n\n"
+        buttons.append([InlineKeyboardButton(f"🗑 Delete: {kw}", callback_data=f"ar_del_{rule['_id']}")])
+    buttons.append([InlineKeyboardButton("Back 🔙", callback_data="auto_reply")])
+    await cb.message.edit_text(caption, reply_markup=kb(buttons), parse_mode=ParseMode.HTML)
+
+# ── Auto Reply incoming message listener (runs on hosted Telethon accounts) ──
+
+async def run_auto_reply_listener(uid):
+    """Start Telethon listeners for all accounts of a user to handle auto-reply."""
+    accounts = db.get_user_accounts(uid)
+    for acc in accounts:
+        try:
+            session_str = cipher_suite.decrypt(acc['session_string'].encode()).decode()
+            tg = TelegramClient(StringSession(session_str), config.API_ID, config.API_HASH)
+            await tg.start()
+
+            @tg.on(events.NewMessage(incoming=True))
+            async def handler(event, _tg=tg, _uid=uid):
+                if not db.get_auto_reply_enabled(_uid):
+                    return
+                rules = db.get_auto_reply_rules(_uid)
+                text = (event.message.text or "").lower()
+                for rule in rules:
+                    if rule["keyword"] in text:
+                        try:
+                            await event.reply(rule["reply_text"])
+                            logger.info(f"Auto-replied to message in chat {event.chat_id} with keyword '{rule['keyword']}'")
+                        except Exception as e:
+                            logger.warning(f"Auto-reply failed in chat {event.chat_id}: {e}")
+                        break  # only first matching rule fires per message
+
+            logger.info(f"Auto-reply listener started for account {acc['phone_number']} (user {uid})")
+        except Exception as e:
+            logger.error(f"Failed to start auto-reply listener for account {acc['phone_number']}: {e}")
 
 @pyro.on_callback_query(filters.regex("analytics"))
 async def analytics(client, cb):
@@ -1448,6 +1589,60 @@ async def handle_text_message(client, m):
             await send_dm_log(uid, f"<b>╰_╯Account login failed:❌</b> {str(e)}")
         finally:
             await tg.disconnect()
+    elif state == "ar_wait_keyword":
+        keyword = text.lower().strip()
+        if not keyword or len(keyword) > 50:
+            await m.reply(
+                "<blockquote><b>❌ Invalid keyword!</b></blockquote>\n\n"
+                "Keyword must be between 1–50 characters. Please try again.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb([[InlineKeyboardButton("Cancel 🔙", callback_data="auto_reply")]])
+            )
+            return
+        # Store keyword temporarily and ask for reply message
+        db.set_user_temp_data(uid, "ar_keyword", keyword)
+        db.set_user_state(uid, "ar_wait_reply")
+        await m.reply(
+            f"<blockquote><b>╰_╯ ADD AUTO REPLY — Step 2/2</b></blockquote>\n\n"
+            f"Keyword saved: <code>{keyword}</code>\n\n"
+            "Now send the <b>reply message</b> that will be sent when this keyword is detected.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("Cancel 🔙", callback_data="auto_reply")]])
+        )
+    elif state == "ar_wait_reply":
+        keyword = db.get_user_temp_data(uid, "ar_keyword")
+        if not keyword:
+            db.set_user_state(uid, "")
+            await m.reply(
+                "<blockquote><b>❌ Session expired.</b></blockquote>\n\nPlease start again.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb([[InlineKeyboardButton("Auto Reply 🔙", callback_data="auto_reply")]])
+            )
+            return
+        try:
+            db.add_auto_reply_rule(uid, keyword, text)
+            db.set_user_state(uid, "")
+            await m.reply(
+                f"<blockquote><b>✅ Auto Reply Rule Saved!</b></blockquote>\n\n"
+                f"Keyword: <code>{keyword}</code>\n"
+                f"Reply: <i>{text[:100]}{'…' if len(text) > 100 else ''}</i>\n\n"
+                "This reply will fire automatically when the keyword is detected in any incoming message on your hosted accounts.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb([
+                    [InlineKeyboardButton("➕ Add Another", callback_data="ar_add")],
+                    [InlineKeyboardButton("📋 My Rules", callback_data="ar_list")],
+                    [InlineKeyboardButton("Dashboard 🚪", callback_data="menu_main")]
+                ])
+            )
+            logger.info(f"Auto-reply rule added for user {uid}: keyword='{keyword}'")
+        except Exception as e:
+            logger.error(f"Failed to save auto-reply rule for user {uid}: {e}")
+            db.set_user_state(uid, "")
+            await m.reply(
+                f"<blockquote><b>❌ Failed to save rule!</b></blockquote>\n\nError: {str(e)}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb([[InlineKeyboardButton("Auto Reply 🔙", callback_data="auto_reply")]])
+            )
 
 async def main():
     await pyro.start()
