@@ -3,3 +3,4 @@ telethon==1.36.0
 pymongo==4.10.1
 cryptography==43.0.1
 tgcrypto==1.2.5
+certifi
