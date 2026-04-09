@@ -32,11 +32,11 @@ TECH_LOG_CHANNEL_ID = 0
 GROUP_ID = 0
 
 # External Links
-PRIVACY_POLICY_URL = ""
-SUPPORT_GROUP_URL = ""
-UPDATES_CHANNEL_URL = ""
-GUIDE_URL = ""
-PRIVATE_CHANNEL_INVITE = ""
+PRIVACY_POLICY_URL = "https://t.me/TecxoChat"
+SUPPORT_GROUP_URL = "https://t.me/TecxoChat"
+UPDATES_CHANNEL_URL = "https://t.me/TecxoChat"
+GUIDE_URL = "https://t.me/TecxoChat"
+PRIVATE_CHANNEL_INVITE = "https://t.me/TecxoChat"
 
 # Encryption Key
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")
