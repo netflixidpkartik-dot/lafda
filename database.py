@@ -82,6 +82,7 @@ class EnhancedDatabaseManager:
                 ensure_index(self.db.temp_data, [("user_id", pymongo.ASCENDING), ("key", pymongo.ASCENDING)], unique=True)
                 ensure_index(self.db.logger_status, "user_id", unique=True)
                 ensure_index(self.db.logger_failures, "user_id")
+                ensure_index(self.db.auto_replies, [("user_id", pymongo.ASCENDING), ("keyword", pymongo.ASCENDING)], unique=True)
                 return
             except ConnectionFailure as e:
                 logger.error(f"MongoDB connection attempt {attempt + 1}/{max_retries} failed: {e}")
@@ -705,6 +706,60 @@ class EnhancedDatabaseManager:
         except Exception as e:
             logger.error(f"Failed to get logger failures for {user_id}: {e}")
             return []
+
+    # ── AUTO REPLY ────────────────────────────────────────────────────────────
+
+    def add_auto_reply_rule(self, user_id, keyword, reply_text):
+        """Add or update an auto-reply rule for a keyword."""
+        try:
+            self.db.auto_replies.update_one(
+                {"user_id": user_id, "keyword": keyword.lower().strip()},
+                {"$set": {"reply_text": reply_text, "updated_at": datetime.now()},
+                 "$setOnInsert": {"created_at": datetime.now()}},
+                upsert=True
+            )
+            logger.info(f"Auto-reply rule saved for user {user_id}: keyword='{keyword}'")
+        except Exception as e:
+            logger.error(f"Failed to add auto-reply rule for {user_id}: {e}")
+            raise
+
+    def get_auto_reply_rules(self, user_id):
+        """Get all auto-reply rules for a user."""
+        try:
+            return list(self.db.auto_replies.find({"user_id": user_id}))
+        except Exception as e:
+            logger.error(f"Failed to get auto-reply rules for {user_id}: {e}")
+            return []
+
+    def delete_auto_reply_rule(self, user_id, rule_id):
+        """Delete a specific auto-reply rule by its ObjectId string."""
+        try:
+            self.db.auto_replies.delete_one({"_id": ObjectId(rule_id), "user_id": user_id})
+            logger.info(f"Deleted auto-reply rule {rule_id} for user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to delete auto-reply rule {rule_id} for {user_id}: {e}")
+            raise
+
+    def set_auto_reply_enabled(self, user_id, enabled: bool):
+        """Toggle auto-reply on/off for a user."""
+        try:
+            self.db.users.update_one(
+                {"user_id": user_id},
+                {"$set": {"auto_reply_enabled": enabled}}
+            )
+            logger.info(f"Auto-reply {'enabled' if enabled else 'disabled'} for user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to set auto-reply status for {user_id}: {e}")
+            raise
+
+    def get_auto_reply_enabled(self, user_id):
+        """Check if auto-reply is enabled for a user."""
+        try:
+            user = self.db.users.find_one({"user_id": user_id}, {"auto_reply_enabled": 1})
+            return user.get("auto_reply_enabled", False) if user else False
+        except Exception as e:
+            logger.error(f"Failed to get auto-reply status for {user_id}: {e}")
+            return False
 
     def close(self):
         """Close MongoDB connection."""
