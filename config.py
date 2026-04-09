@@ -7,7 +7,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 LOGGER_BOT_TOKEN = os.getenv("LOGGER_BOT_TOKEN", "")
 BOT_USERNAME = "TecxoAdsBot"
 BOT_NAME = "Tecxo Ads 🚀"
-LOGGER_BOT_USERNAME = "TecxoAds2bot"
+LOGGER_BOT_USERNAME = "AdbotLogv7bot"
 
 # Admin Settings
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
