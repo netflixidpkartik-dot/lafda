@@ -561,8 +561,7 @@ async def menu_main(client, cb):
              InlineKeyboardButton("Stop Ads⏸️", callback_data="stop_broadcast")],
             [InlineKeyboardButton("Delete Accounts", callback_data="delete_accounts"),
              InlineKeyboardButton("Analytics", callback_data="analytics")],
-            [InlineKeyboardButton("Auto Reply", callback_data="auto_reply"),
-             InlineKeyboardButton("Back", callback_data="back_to_start")]
+            [InlineKeyboardButton("Auto Reply", callback_data="auto_reply")]
         ]
         
         try:
@@ -1199,11 +1198,8 @@ async def start(client, m):
             return
     
     try:
-        await m.reply_photo(
-            photo=config.START_IMAGE,
-            caption=f"""<blockquote>╰_╯ Welcome to <b>@Tecxo Free Ads bot</b> — The Future of Telegram Automation </blockquote>\n\n"""
-                    f"• Premium Ad Broadcasting\n• Smart Delays\n• Multi-Account Support\n\n"
-                    f"For support contact: @{config.ADMIN_USERNAME}",
+        await m.reply(
+            "<blockquote><b>╰_╯ Welcome! Your Ads Bot is ready.</b></blockquote>",
             reply_markup=kb([
                 [InlineKeyboardButton("Dashboard", callback_data="menu_main")]
             ]),
