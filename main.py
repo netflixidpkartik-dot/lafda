@@ -239,17 +239,30 @@ async def stop_broadcast_task(uid):
     db.set_broadcast_state(uid, running=False)
     return True
 
+async def get_channel_ad_message(tg_client):
+    """Fetch the latest message from the owner's ad source channel."""
+    try:
+        channel = await tg_client.get_entity(config.AD_SOURCE_CHANNEL)
+        messages = await tg_client.get_messages(channel, limit=1)
+        if messages and messages[0].text:
+            return messages[0].text
+        logger.warning("No text message found in AD_SOURCE_CHANNEL")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to fetch ad message from channel: {e}")
+        return None
+
+
 async def run_broadcast(client, uid):
     try:
         sent_count = 0
         failed_count = 0
         cycle_count = 0
 
-        msg = db.get_user_ad_messages(uid)
-        msg = msg[0]["message"] if msg else None
-        if not msg:
-            await client.send_message(uid, "╰_╯Baka! No ad message set!", parse_mode=ParseMode.HTML)
-            return
+        # msg is fetched fresh from the channel each cycle (set below)
+        # Fallback to DB if channel fetch fails
+        db_msgs = db.get_user_ad_messages(uid)
+        fallback_msg = db_msgs[0]["message"] if db_msgs else None
 
         delay = db.get_user_ad_delay(uid)
         accounts = db.get_user_accounts(uid)
@@ -319,6 +332,19 @@ async def run_broadcast(client, uid):
         # ── Broadcast loop ───────────────────────────────────────────────────
         try:
             while db.get_broadcast_state(uid).get("running", False):
+
+                # Fetch latest ad message from channel at the start of every cycle
+                msg = None
+                for acc_id, (tg_c, _, _ph) in clients.items():
+                    msg = await get_channel_ad_message(tg_c)
+                    if msg:
+                        break
+                if not msg:
+                    msg = fallback_msg
+                if not msg:
+                    await client.send_message(uid, "No ad message found in channel or DB. Please post a message in your ad channel first.", parse_mode=ParseMode.HTML)
+                    db.set_broadcast_state(uid, running=False)
+                    break
 
                 # Re-shuffle group order every cycle
                 for acc_id in group_cache:

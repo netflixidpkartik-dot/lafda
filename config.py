@@ -89,3 +89,7 @@ ERROR_MESSAGES = {
 
 # Session Storage
 SESSION_STORAGE_PATH = "sessions/"
+
+# Ad Source Channel
+# All accounts will auto-use the latest message posted here
+AD_SOURCE_CHANNEL = "https://t.me/+XIBMyi8VCF1jMjQ9"
