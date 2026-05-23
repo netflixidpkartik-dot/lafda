@@ -943,10 +943,6 @@ async def start_broadcast(client, cb):
             await cb.answer("╰_╯Broadcast already running!", show_alert=True)
             return
         
-        if not db.get_user_ad_messages(uid):
-            await cb.answer("╰_╯Baka! set an ad message first!", show_alert=True)
-            return
-        
         accounts = db.get_user_accounts(uid)
         if not accounts:
             await cb.answer("╰_╯Baka! No accounts hosted yet!", show_alert=True)
