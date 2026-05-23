@@ -297,6 +297,13 @@ async def run_broadcast(client, uid):
                     await send_dm_log(uid, f"<b>⚠️ Account deactivated (unauthorized):</b> <code>{acc['phone_number']}</code>")
                     continue
 
+                # Auto-join the ad source channel if not already in it
+                try:
+                    await tg_client(functions.channels.JoinChannelRequest(config.AD_SOURCE_CHANNEL))
+                    logger.info(f"Account {acc['phone_number']} joined ad source channel")
+                except Exception as e:
+                    logger.info(f"Account {acc['phone_number']} already in channel or join skipped: {e}")
+
                 # Fetch ALL groups, then shuffle order
                 cached_groups = []
                 async for dialog in tg_client.iter_dialogs(limit=None):
