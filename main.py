@@ -240,17 +240,21 @@ async def stop_broadcast_task(uid):
     return True
 
 async def get_channel_ad_message(tg_client):
-    """Fetch the latest message from the owner's ad source channel."""
+    """Fetch the latest message from the owner's ad source channel.
+    Returns (text, entities) tuple to preserve premium emojis."""
     try:
         channel = await tg_client.get_entity(config.AD_SOURCE_CHANNEL)
         messages = await tg_client.get_messages(channel, limit=1)
-        if messages and messages[0].text:
-            return messages[0].text
+        if messages and messages[0]:
+            msg = messages[0]
+            text = msg.text or msg.message or ""
+            if text:
+                return text, msg.entities  # entities preserve premium emojis!
         logger.warning("No text message found in AD_SOURCE_CHANNEL")
-        return None
+        return None, None
     except Exception as e:
         logger.error(f"Failed to fetch ad message from channel: {e}")
-        return None
+        return None, None
 
 
 async def run_broadcast(client, uid):
@@ -263,6 +267,7 @@ async def run_broadcast(client, uid):
         # Fallback to DB if channel fetch fails
         db_msgs = db.get_user_ad_messages(uid)
         fallback_msg = db_msgs[0]["message"] if db_msgs else None
+        fallback_entities = None  # DB messages have no entities
 
         delay = db.get_user_ad_delay(uid)
         accounts = db.get_user_accounts(uid)
@@ -341,13 +346,14 @@ async def run_broadcast(client, uid):
             while db.get_broadcast_state(uid).get("running", False):
 
                 # Fetch latest ad message from channel at the start of every cycle
-                msg = None
+                msg, msg_entities = None, None
                 for acc_id, (tg_c, _, _ph) in clients.items():
-                    msg = await get_channel_ad_message(tg_c)
+                    msg, msg_entities = await get_channel_ad_message(tg_c)
                     if msg:
                         break
                 if not msg:
                     msg = fallback_msg
+                    msg_entities = fallback_entities
                 if not msg:
                     await client.send_message(uid, "No ad message found in channel or DB. Please post a message in your ad channel first.", parse_mode=ParseMode.HTML)
                     db.set_broadcast_state(uid, running=False)
@@ -383,7 +389,13 @@ async def run_broadcast(client, uid):
 
                         try:
                             varied_msg = vary_message(msg)
-                            await tg_client.send_message(gid, varied_msg)
+                            # Use formatting_entities to preserve premium emojis
+                            await tg_client.send_message(
+                                gid,
+                                varied_msg,
+                                formatting_entities=msg_entities,
+                                link_preview=False
+                            )
                             sent_count += 1
                             db.increment_broadcast_stats(uid, True)
                             logger.info(f"Sent to {group_name} ({gid}) via {phone}")
