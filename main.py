@@ -1110,12 +1110,15 @@ async def adtype_forward(client, cb):
     await cb.message.edit_caption(
         caption=(
             "<blockquote><b>╰_╯ FORWARD MODE 📨</b></blockquote>\n\n"
-            "<b>How it works:</b>\n"
-            "1️⃣ Save your premium emoji ad in your <b>Telegram Saved Messages</b>\n"
-            "2️⃣ Open Saved Messages → long press the message → <b>Forward</b> it here\n\n"
-            "Or forward any message from <b>any channel/group</b> you own.\n\n"
-            "<i>The bot will broadcast by forwarding that exact message — \n"
-            "premium emojis, formatting, everything preserved ✅</i>"
+            "<b>How to set your ad:</b>\n\n"
+            "1️⃣ Post your premium emoji ad to a <b>Telegram channel you own</b>\n"
+            "2️⃣ Open that channel post\n"
+            "3️⃣ Tap <b>Share → Forward</b> → select this bot\n\n"
+            "<b>⚠️ Why not Saved Messages?</b>\n"
+            "<i>Telegram hides the message ID for private chat forwards. "
+            "Only channel post forwards expose the ID needed to re-broadcast.</i>\n\n"
+            "Once set, the bot will forward that exact channel post to all groups — "
+            "premium emojis, stickers, everything preserved ✅"
         ),
         parse_mode=ParseMode.HTML,
         reply_markup=kb([[InlineKeyboardButton("Cancel 🔙", callback_data="set_msg")]])
@@ -1754,8 +1757,85 @@ async def handle_group_link(client, m):
         await send_dm_log(uid, f"<b>❌ Failed to add group:</b> {str(e)} 😔")
         logger.error(f"Failed to add group for {uid}: {e}")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FORWARD-AD HANDLER — catches ANY message type when waiting for a forwarded ad
+# Must be registered BEFORE the photo/text handlers so it takes priority
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pyro.on_message(filters.private & ~filters.command(["start", "bd", "me", "stats", "stop"]))
+async def handle_forward_ad(client, m):
+    uid = m.from_user.id
+    state = db.get_user_state(uid)
+    if state != "waiting_forward_ad":
+        return  # not our turn — let other handlers process it
+
+    fwd_chat_id = None
+    fwd_msg_id  = None
+
+    # ── Pyrogram v2: MessageOriginChannel is the only origin with a message_id ──
+    fwd_origin = getattr(m, "forward_origin", None)
+    if fwd_origin:
+        origin_type = type(fwd_origin).__name__
+        logger.info(f"Forward origin type for {uid}: {origin_type} | attrs: {dir(fwd_origin)}")
+
+        # MessageOriginChannel → has .chat and .message_id
+        if hasattr(fwd_origin, "message_id") and fwd_origin.message_id:
+            fwd_msg_id = int(fwd_origin.message_id)
+            if hasattr(fwd_origin, "chat") and fwd_origin.chat:
+                fwd_chat_id = int(fwd_origin.chat.id)
+
+    # ── Pyrogram v1 legacy fields ───────────────────────────────────────────────
+    if not fwd_chat_id and getattr(m, "forward_from_chat", None):
+        fwd_chat_id = int(m.forward_from_chat.id)
+        fwd_msg_id  = int(m.forward_from_message_id or 0) or None
+
+    # ── Nothing found ───────────────────────────────────────────────────────────
+    if not fwd_chat_id or not fwd_msg_id:
+        await m.reply(
+            "<blockquote><b>❌ Can't read forward origin!</b></blockquote>\n\n"
+            "Forwarding from <b>Saved Messages</b> doesn't expose the original message ID "
+            "— Telegram hides it for private chats.\n\n"
+            "<b>✅ How to fix:</b>\n"
+            "1️⃣ Post your premium emoji ad to a <b>Telegram channel you own</b>\n"
+            "2️⃣ Open that channel post → tap <b>Share → Forward</b> → select this bot\n\n"
+            "<i>Only channel/group forwards expose the message ID needed for broadcasting.</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("Try Again 🔄", callback_data="adtype_forward"),
+                              InlineKeyboardButton("Cancel", callback_data="set_msg")]])
+        )
+        return
+
+    try:
+        db.add_user_ad_message(
+            uid, "", datetime.now(),
+            photo_path=None, ad_type="forward",
+            entities=[],
+            from_chat_id=fwd_chat_id,
+            message_id=fwd_msg_id
+        )
+        db.set_user_state(uid, "")
+        logger.info(f"Forward-mode ad set for {uid}: from_chat={fwd_chat_id} msg_id={fwd_msg_id}")
+        await m.reply(
+            "<blockquote><b>╰_╯ FORWARD AD SET! ✅</b></blockquote>\n\n"
+            f"Source channel: <code>{fwd_chat_id}</code>\n"
+            f"Message ID: <code>{fwd_msg_id}</code>\n\n"
+            "<b>Broadcasting will forward this exact message</b> —\n"
+            "premium emojis, stickers, and all formatting preserved! 🚀",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("Dashboard 🚪", callback_data="menu_main")]])
+        )
+        await send_dm_log(uid, f"<b>📨 Forward-mode ad set:</b> chat <code>{fwd_chat_id}</code> msg <code>{fwd_msg_id}</code>")
+    except Exception as e:
+        logger.error(f"Failed to save forward-mode ad for {uid}: {e}")
+        db.set_user_state(uid, "")
+        await m.reply(f"<b>❌ Error:</b> {str(e)}", parse_mode=ParseMode.HTML,
+                      reply_markup=kb([[InlineKeyboardButton("Back", callback_data="set_msg")]]))
+
+
 @pyro.on_message(filters.photo & filters.private)
 async def handle_photo_message(client, m):
+
     uid = m.from_user.id
     state = db.get_user_state(uid)
     # Accept photo in both old 'waiting_broadcast_msg' and new typed states
