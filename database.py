@@ -312,10 +312,11 @@ class EnhancedDatabaseManager:
             logger.error(f"Failed to get ad messages for {user_id}: {e}")
             return []
 
-    def add_user_ad_message(self, user_id, message, created_at, photo_path=None, ad_type="text", entities=None):
-        """Add an ad message for a user, with optional photo_path, ad_type and entities.
+    def add_user_ad_message(self, user_id, message, created_at, photo_path=None, ad_type="text", entities=None, from_chat_id=None, message_id=None):
+        """Add an ad message for a user, with optional photo_path, ad_type, entities and forward origin.
         ad_type can be: 'text', 'photo', 'both'
         entities: list of dicts representing message formatting entities (for premium emoji etc.)
+        from_chat_id + message_id: origin of the message for Telethon forwarding (100% preserves premium emojis)
         """
         try:
             update_data = {
@@ -323,7 +324,9 @@ class EnhancedDatabaseManager:
                 "created_at": created_at,
                 "updated_at": datetime.now(),
                 "ad_type": ad_type,
-                "entities": entities or []
+                "entities": entities or [],
+                "from_chat_id": int(from_chat_id) if from_chat_id is not None else None,
+                "message_id": int(message_id) if message_id is not None else None,
             }
             if photo_path is not None:
                 update_data["photo_path"] = photo_path
