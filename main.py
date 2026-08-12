@@ -6,6 +6,19 @@ import json
 from datetime import datetime, timedelta
 from telethon import TelegramClient, functions, types, events
 from telethon.sessions import StringSession
+from telethon.tl.types import (
+    MessageEntityCustomEmoji,
+    MessageEntityBold,
+    MessageEntityItalic,
+    MessageEntityCode,
+    MessageEntityPre,
+    MessageEntityTextUrl,
+    MessageEntityMention,
+    MessageEntityStrike,
+    MessageEntityUnderline,
+    MessageEntitySpoiler,
+    MessageEntityBlockquote,
+)
 from telethon.errors import (
     SessionPasswordNeededError,
     FloodWaitError,
@@ -28,8 +41,72 @@ from cryptography.fernet import Fernet
 
 # Helper functions
 def validate_phone_number(phone):
-    pattern = r"^\+[1-9]\d{1,14}$"
+    pattern = r'^\+[1-9]\d{6,14}$'
     return bool(re.match(pattern, phone))
+
+
+def entities_to_dict(entities):
+    """Serialize Pyrogram message entities to a JSON-safe list of dicts."""
+    if not entities:
+        return []
+    result = []
+    for e in entities:
+        try:
+            etype = e.type.value if hasattr(e.type, 'value') else str(e.type)
+            d = {
+                "type": etype,
+                "offset": e.offset,
+                "length": e.length,
+            }
+            if hasattr(e, 'custom_emoji_id') and e.custom_emoji_id:
+                d["custom_emoji_id"] = str(e.custom_emoji_id)
+            if hasattr(e, 'url') and e.url:
+                d["url"] = e.url
+            result.append(d)
+        except Exception:
+            pass
+    return result
+
+
+def pyrogram_entities_to_telethon(entities_data):
+    """Convert saved entity dicts back to Telethon entity objects for sending."""
+    if not entities_data:
+        return None
+    telethon_entities = []
+    for e in entities_data:
+        etype = e.get("type", "")
+        offset = e.get("offset", 0)
+        length = e.get("length", 0)
+        try:
+            if etype == "custom_emoji":
+                doc_id = int(e.get("custom_emoji_id", 0))
+                if doc_id:
+                    telethon_entities.append(MessageEntityCustomEmoji(offset=offset, length=length, document_id=doc_id))
+            elif etype == "bold":
+                telethon_entities.append(MessageEntityBold(offset=offset, length=length))
+            elif etype == "italic":
+                telethon_entities.append(MessageEntityItalic(offset=offset, length=length))
+            elif etype == "code":
+                telethon_entities.append(MessageEntityCode(offset=offset, length=length))
+            elif etype == "pre":
+                telethon_entities.append(MessageEntityPre(offset=offset, length=length, language=""))
+            elif etype == "text_link":
+                telethon_entities.append(MessageEntityTextUrl(offset=offset, length=length, url=e.get("url", "")))
+            elif etype == "mention":
+                telethon_entities.append(MessageEntityMention(offset=offset, length=length))
+            elif etype == "strikethrough":
+                telethon_entities.append(MessageEntityStrike(offset=offset, length=length))
+            elif etype == "underline":
+                telethon_entities.append(MessageEntityUnderline(offset=offset, length=length))
+            elif etype == "spoiler":
+                telethon_entities.append(MessageEntitySpoiler(offset=offset, length=length))
+            elif etype == "blockquote":
+                telethon_entities.append(MessageEntityBlockquote(offset=offset, length=length))
+        except Exception:
+            pass
+    return telethon_entities if telethon_entities else None
+
+
 
 def generate_progress_bar(current, total, length=10):
     if total <= 0:
@@ -289,6 +366,7 @@ async def run_broadcast(client, uid, account_ids=None):
         fallback_text = db_msgs[0].get("message") if db_msgs else None
         fallback_photo = db_msgs[0].get("photo_path") if db_msgs else None
         fallback_ad_type = db_msgs[0].get("ad_type", "text") if db_msgs else "text"
+        fallback_entities = db_msgs[0].get("entities", []) if db_msgs else []
 
         delay = db.get_user_ad_delay(uid)
         all_accounts = db.get_user_accounts(uid)
@@ -376,6 +454,7 @@ async def run_broadcast(client, uid, account_ids=None):
                 # Re-read DB ad settings at start of each cycle (user may have updated them)
                 db_msgs_fresh = db.get_user_ad_messages(uid)
                 active_ad_type = db_msgs_fresh[0].get("ad_type", fallback_ad_type) if db_msgs_fresh else fallback_ad_type
+                active_entities_data = db_msgs_fresh[0].get("entities", fallback_entities) if db_msgs_fresh else fallback_entities
 
                 # Fetch latest ad message/media from channel at the start of every cycle
                 channel_caption, channel_media = None, None
@@ -386,9 +465,10 @@ async def run_broadcast(client, uid, account_ids=None):
 
                 # Determine active content based on ad_type
                 if channel_caption or channel_media:
-                    # Channel content: use as-is
+                    # Channel content: use as-is (channel messages don't carry entity data here)
                     active_caption = channel_caption
                     active_media = channel_media
+                    active_entities_data = []  # channel content has no saved entities
                 else:
                     # Use user-set DB content filtered by ad_type
                     if active_ad_type == "text":
@@ -437,15 +517,30 @@ async def run_broadcast(client, uid, account_ids=None):
                         try:
                             varied_caption = vary_message(active_caption or "")
 
+                            # Convert saved entities to Telethon format (preserves premium emojis)
+                            tl_entities = pyrogram_entities_to_telethon(active_entities_data)
+
                             # Send based on active_ad_type
                             if active_media and active_ad_type in ("photo", "both"):
-                                await tg_client.send_file(gid, file=active_media, caption=varied_caption)
+                                await tg_client.send_file(
+                                    gid, file=active_media, caption=varied_caption,
+                                    formatting_entities=tl_entities
+                                )
                             elif active_caption and active_ad_type == "text":
-                                await tg_client.send_message(gid, varied_caption)
+                                await tg_client.send_message(
+                                    gid, varied_caption,
+                                    formatting_entities=tl_entities
+                                )
                             elif active_media:
-                                await tg_client.send_file(gid, file=active_media, caption=varied_caption)
+                                await tg_client.send_file(
+                                    gid, file=active_media, caption=varied_caption,
+                                    formatting_entities=tl_entities
+                                )
                             else:
-                                await tg_client.send_message(gid, varied_caption)
+                                await tg_client.send_message(
+                                    gid, varied_caption,
+                                    formatting_entities=tl_entities
+                                )
                                 
                             sent_count += 1
                             db.increment_broadcast_stats(uid, True)
@@ -1641,7 +1736,14 @@ async def handle_photo_message(client, m):
             else:
                 ad_type = "both" if caption_text else "photo"
 
-            db.add_user_ad_message(uid, caption_text, datetime.now(), photo_path=photo_file, ad_type=ad_type)
+            # Capture caption entities (premium emojis, bold, etc.)
+            caption_entities = entities_to_dict(m.caption_entities or [])
+
+            db.add_user_ad_message(
+                uid, caption_text, datetime.now(),
+                photo_path=photo_file, ad_type=ad_type,
+                entities=caption_entities
+            )
             db.set_user_state(uid, "")
 
             type_label = "Photo + Text 🖼️📝" if (ad_type == "both" and caption_text) else "Photo Only 🖼️"
@@ -1708,7 +1810,14 @@ async def handle_text_message(client, m):
             else:
                 ad_type = "text"  # fallback for old state
 
-            db.add_user_ad_message(uid, text, datetime.now(), photo_path=None, ad_type=ad_type)
+            # Capture message entities (premium emojis, bold, etc.)
+            msg_entities = entities_to_dict(m.entities or [])
+
+            db.add_user_ad_message(
+                uid, text, datetime.now(),
+                photo_path=None, ad_type=ad_type,
+                entities=msg_entities
+            )
             db.set_user_state(uid, "")
             await m.reply(
                 f"<blockquote><b>╰_╯ AD MESSAGE SET!✅</b></blockquote>\n\n"
