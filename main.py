@@ -102,6 +102,9 @@ logger_client = PyroClient("logger_bot", api_id=config.API_ID, api_hash=config.A
 # In-memory storage for broadcast tasks
 user_tasks = {}
 
+# In-memory storage for auto-reply Telethon clients: {owner_uid: {acc_id: tg_client}}
+autoreply_clients = {}
+
 # Errors that mean an account is banned/restricted — stop using it immediately
 BAN_ERRORS = (
     "UserBannedInChannel",
@@ -283,6 +286,8 @@ async def run_broadcast(client, uid):
         db_msgs = db.get_user_ad_messages(uid)
         fallback_text = db_msgs[0].get("message") if db_msgs else None
         fallback_photo = db_msgs[0].get("photo_path") if db_msgs else None
+        # ad_type: 'text', 'photo', 'both'
+        fallback_ad_type = db_msgs[0].get("ad_type", "text") if db_msgs else "text"
 
         delay = db.get_user_ad_delay(uid)
         accounts = db.get_user_accounts(uid)
@@ -360,19 +365,36 @@ async def run_broadcast(client, uid):
         try:
             while db.get_broadcast_state(uid).get("running", False):
 
+                # Re-read DB ad settings at start of each cycle (user may have updated them)
+                db_msgs_fresh = db.get_user_ad_messages(uid)
+                active_ad_type = db_msgs_fresh[0].get("ad_type", fallback_ad_type) if db_msgs_fresh else fallback_ad_type
+
                 # Fetch latest ad message/media from channel at the start of every cycle
                 channel_caption, channel_media = None, None
                 for acc_id, (tg_c, _, _ph) in clients.items():
                     channel_caption, channel_media = await get_channel_ad_message(tg_c)
                     if channel_caption or channel_media:
                         break
-                
-                # Determine active message content & media
-                active_caption = channel_caption if (channel_caption or channel_media) else fallback_text
-                active_media = channel_media if (channel_caption or channel_media) else fallback_photo
+
+                # Determine active content based on ad_type
+                if channel_caption or channel_media:
+                    # Channel content: use as-is
+                    active_caption = channel_caption
+                    active_media = channel_media
+                else:
+                    # Use user-set DB content filtered by ad_type
+                    if active_ad_type == "text":
+                        active_caption = fallback_text
+                        active_media = None
+                    elif active_ad_type == "photo":
+                        active_caption = ""  # no text
+                        active_media = fallback_photo
+                    else:  # 'both'
+                        active_caption = fallback_text
+                        active_media = fallback_photo
 
                 if not active_caption and not active_media:
-                    await client.send_message(uid, "No ad message or photo found in channel or DB. Please set an ad message/photo first.", parse_mode=ParseMode.HTML)
+                    await client.send_message(uid, "No ad message or photo found. Please set an ad message/photo first.", parse_mode=ParseMode.HTML)
                     db.set_broadcast_state(uid, running=False)
                     break
 
@@ -406,9 +428,13 @@ async def run_broadcast(client, uid):
 
                         try:
                             varied_caption = vary_message(active_caption or "")
-                            
-                            # If media is present, send with send_file
-                            if active_media:
+
+                            # Send based on active_ad_type
+                            if active_media and active_ad_type in ("photo", "both"):
+                                await tg_client.send_file(gid, file=active_media, caption=varied_caption)
+                            elif active_caption and active_ad_type == "text":
+                                await tg_client.send_message(gid, varied_caption)
+                            elif active_media:
                                 await tg_client.send_file(gid, file=active_media, caption=varied_caption)
                             else:
                                 await tg_client.send_message(gid, varied_caption)
@@ -726,15 +752,23 @@ async def menu_main(client, cb):
         running = broadcast_state.get("running", False)
         broadcast_status = "Running 🚀" if running else "Paused ⏸️"
         
+        auto_reply_data = db.get_auto_reply(uid)
+        ar_status = "ON ✅" if auto_reply_data.get("enabled") else "OFF ❌"
+
         dashboard_caption = (
             f"<blockquote><b>╰_╯ ADS DASHBOARD</b></blockquote>\n\n"
             f"•Hosted Accounts: <code>{accounts_count}</code>\n"
             f"•Ad Message: {ad_msg_status}\n"
             f"•Cycle Interval: {current_delay}s\n"
-            f"•Advertising Status: <b>{broadcast_status}</b>\n\n"
+            f"•Advertising Status: <b>{broadcast_status}</b>\n"
+            f"•Auto Reply: <b>{ar_status}</b>\n\n"
             "<blockquote>╰_╯Choose an action below to continue </blockquote>"
         )
         
+        # Auto-reply status
+        auto_reply = db.get_auto_reply(uid)
+        ar_status = "ON ✅" if auto_reply.get("enabled") else "OFF ❌"
+
         menu = [
             [InlineKeyboardButton("Add Accounts", callback_data="host_account"),
              InlineKeyboardButton("My Accounts", callback_data="view_accounts")],
@@ -742,8 +776,9 @@ async def menu_main(client, cb):
              InlineKeyboardButton("Set Time Interval", callback_data="set_delay")],
             [InlineKeyboardButton("Start Ads▶️", callback_data="start_broadcast"),
              InlineKeyboardButton("Stop Ads⏸️", callback_data="stop_broadcast")],
-            [InlineKeyboardButton("Delete Accounts", callback_data="delete_accounts"),
-             InlineKeyboardButton("Analytics", callback_data="analytics")]
+            [InlineKeyboardButton(f"Auto Reply {ar_status}", callback_data="auto_reply_menu"),
+             InlineKeyboardButton("Analytics", callback_data="analytics")],
+            [InlineKeyboardButton("Delete Accounts", callback_data="delete_accounts")]
         ]
         
         try:
@@ -905,42 +940,78 @@ async def view_account(client, cb):
         parse_mode=ParseMode.HTML
     )
 
-@pyro.on_callback_query(filters.regex("set_msg"))
+@pyro.on_callback_query(filters.regex("^set_msg$"))
 async def set_msg(client, cb):
     uid = cb.from_user.id
-    db.set_user_state(uid, "waiting_broadcast_msg")
     saved_msgs = db.get_user_ad_messages(uid)
-    
-    current_msg = "None set"
+
+    current_status = "Not Set ⭕"
     if saved_msgs:
         msg_doc = saved_msgs[0]
-        text_content = msg_doc.get("message", "")
-        photo_content = msg_doc.get("photo_path")
-        if photo_content and text_content:
-            current_msg = f"[Photo Attached 🖼️]\n{text_content}"
-        elif photo_content:
-            current_msg = "[Photo Only 🖼️]"
-        elif text_content:
-            current_msg = text_content
+        ad_type = msg_doc.get("ad_type", "text")
+        if ad_type == "both":
+            current_status = "Photo + Text 🖼️📝"
+        elif ad_type == "photo":
+            current_status = "Photo Only 🖼️"
+        else:
+            current_status = "Text Only 📝"
 
-    current_msg_section = f"\n\n<blockquote><b>Current Ad Message:</b>\n{current_msg}</blockquote>" if current_msg != "None set" else "\n\n<blockquote><b>Current Ad Message:</b>\nNo message set yet.</blockquote>"
-    
     await cb.message.edit_media(
         media=InputMediaPhoto(
             media=config.START_IMAGE,
-            caption=f"""<blockquote>╰_╯ <b>SET YOUR AD MESSAGE OR PHOTO</b></blockquote>{current_msg_section}
-
-Tips for effective ads:
-•You can now send a <b>Photo</b> (with optional text caption) or a <b>Text message</b>! 🖼️📝
-•Keep it concise and engaging
-•Use premium emojis for flair
-•Include clear call-to-action
-•Avoid excessive caps or spam words
-
-<blockquote>Send your photo or text ad message now:</blockquote>""",
+            caption=(
+                f"<blockquote>╰_╯ <b>SET YOUR AD TYPE</b></blockquote>\n\n"
+                f"<b>Current:</b> {current_status}\n\n"
+                f"Choose what type of ad you want to broadcast:"
+            ),
             parse_mode=ParseMode.HTML
         ),
-        reply_markup=kb([[InlineKeyboardButton("Back", callback_data="menu_main")]])
+        reply_markup=kb([
+            [InlineKeyboardButton("🖼️ Image Only", callback_data="adtype_photo")],
+            [InlineKeyboardButton("📝 Text Only", callback_data="adtype_text")],
+            [InlineKeyboardButton("🖼️📝 Image + Text (Both)", callback_data="adtype_both")],
+            [InlineKeyboardButton("Back 🔙", callback_data="menu_main")]
+        ])
+    )
+
+
+@pyro.on_callback_query(filters.regex("^adtype_(photo|text|both)$"))
+async def adtype_select(client, cb):
+    uid = cb.from_user.id
+    ad_type = cb.data.split("_")[1]  # 'photo', 'text', or 'both'
+
+    saved_msgs = db.get_user_ad_messages(uid)
+    if saved_msgs:
+        # Preserve existing content, just update ad_type
+        existing = saved_msgs[0]
+        db.add_user_ad_message(
+            uid,
+            existing.get("message", ""),
+            datetime.now(),
+            photo_path=existing.get("photo_path"),
+            ad_type=ad_type
+        )
+
+    type_labels = {"photo": "Image Only 🖼️", "text": "Text Only 📝", "both": "Image + Text 🖼️📝"}
+    instructions = {
+        "photo": "Now send a <b>photo</b> (caption is optional).",
+        "text": "Now send your <b>text</b> ad message.",
+        "both": "First send a <b>photo</b> with your text as the caption."
+    }
+
+    if ad_type == "text":
+        db.set_user_state(uid, "waiting_broadcast_msg_text")
+    else:
+        db.set_user_state(uid, "waiting_broadcast_msg_photo")
+
+    await cb.message.edit_caption(
+        caption=(
+            f"<blockquote><b>╰_╯ AD TYPE: {type_labels[ad_type]}</b></blockquote>\n\n"
+            f"{instructions[ad_type]}\n\n"
+            f"<i>Tips: Keep it concise, use emojis, include a clear call-to-action.</i>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb([[InlineKeyboardButton("Back 🔙", callback_data="set_msg")]])
     )
 
 @pyro.on_callback_query(filters.regex("set_delay"))
@@ -1413,27 +1484,39 @@ async def handle_group_link(client, m):
 async def handle_photo_message(client, m):
     uid = m.from_user.id
     state = db.get_user_state(uid)
-    if state == "waiting_broadcast_msg":
+    # Accept photo in both old 'waiting_broadcast_msg' and new typed states
+    if state in ("waiting_broadcast_msg", "waiting_broadcast_msg_photo"):
         try:
             os.makedirs("downloads", exist_ok=True)
             photo_file = await client.download_media(m.photo, file_name=f"downloads/{uid}_ad.jpg")
-            caption = m.caption or ""
-            
-            db.add_user_ad_message(uid, caption, datetime.now(), photo_path=photo_file)
+            caption_text = m.caption or ""
+
+            # Determine ad_type from state
+            if state == "waiting_broadcast_msg_photo":
+                # Check current DB ad_type to keep 'both' vs 'photo'
+                saved = db.get_user_ad_messages(uid)
+                ad_type = saved[0].get("ad_type", "photo") if saved else "photo"
+                if ad_type not in ("photo", "both"):
+                    ad_type = "photo"
+            else:
+                ad_type = "both" if caption_text else "photo"
+
+            db.add_user_ad_message(uid, caption_text, datetime.now(), photo_path=photo_file, ad_type=ad_type)
             db.set_user_state(uid, "")
-            
-            caption_preview = f"<code>{caption}</code>" if caption else "<i>No text caption</i>"
+
+            type_label = "Photo + Text 🖼️📝" if (ad_type == "both" and caption_text) else "Photo Only 🖼️"
+            caption_preview = f"<code>{caption_text}</code>" if caption_text else "<i>No text caption</i>"
             await m.reply(
-                f"<blockquote><b>╰_╯ AD PHOTO SET! ✅</b></blockquote>\n\n"
-                f"<u>Photo Saved:</u> Yes 🖼️\n"
+                f"<blockquote><b>╰_╯ AD SET! ✅</b></blockquote>\n\n"
+                f"<u>Type:</u> {type_label}\n"
                 f"<u>Caption Preview:</u>\n{caption_preview}\n\n"
                 f"<b>Ready to broadcast!</b>\n"
                 f"<i>Start your campaign from the dashboard.</i>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb([[InlineKeyboardButton("Dashboard 🚪", callback_data="menu_main")]])
             )
-            await send_dm_log(uid, f"<b>🖼️ Ad Photo updated!</b> Caption: <code>{caption[:50] if caption else 'None'}</code>")
-            logger.info(f"Ad photo set for user {uid}: path={photo_file}")
+            await send_dm_log(uid, f"<b>🖼️ Ad Photo updated!</b> Type: {type_label} | Caption: <code>{caption_text[:50] if caption_text else 'None'}</code>")
+            logger.info(f"Ad photo set for user {uid}: path={photo_file}, ad_type={ad_type}")
         except Exception as e:
             logger.error(f"Failed to add ad photo for user {uid}: {e}")
             db.set_user_state(uid, "")
@@ -1451,11 +1534,41 @@ async def handle_text_message(client, m):
     uid = m.from_user.id
     state = db.get_user_state(uid)
     text = m.text.strip()
-    
-    if state == "waiting_broadcast_msg":
+
+    # ── Auto-reply message setting ───────────────────────────────────────────
+    if state == "waiting_auto_reply":
         try:
-            # Setting text message clears existing saved photo_path if any (or keeps photo_path=None)
-            db.add_user_ad_message(uid, text, datetime.now(), photo_path=None)
+            db.set_auto_reply(uid, message=text)
+            db.set_user_state(uid, "")
+            await m.reply(
+                f"<blockquote><b>╰_╯ AUTO REPLY SET! ✅</b></blockquote>\n\n"
+                f"<u>Your Auto Reply Message:</u>\n<code>{text}</code>\n\n"
+                f"<i>Anyone who DMs your hosted accounts will automatically receive this message.</i>\n"
+                f"<b>Enable it from the Auto Reply menu.</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb([[InlineKeyboardButton("Auto Reply Menu", callback_data="auto_reply_menu"),
+                                  InlineKeyboardButton("Dashboard 🚪", callback_data="menu_main")]])
+            )
+            await send_dm_log(uid, f"<b>💬 Auto reply message set:</b> <code>{text[:50]}</code>")
+            logger.info(f"Auto reply set for user {uid}: {text[:50]}")
+        except Exception as e:
+            logger.error(f"Failed to set auto reply for {uid}: {e}")
+            db.set_user_state(uid, "")
+            await m.reply(f"<b>❌ Failed to set auto reply:</b> {str(e)}",
+                          parse_mode=ParseMode.HTML,
+                          reply_markup=kb([[InlineKeyboardButton("Back", callback_data="auto_reply_menu")]]))
+        return
+
+    # ── Ad text message setting ──────────────────────────────────────────────
+    if state in ("waiting_broadcast_msg", "waiting_broadcast_msg_text"):
+        try:
+            # Determine ad_type from state
+            if state == "waiting_broadcast_msg_text":
+                ad_type = "text"
+            else:
+                ad_type = "text"  # fallback for old state
+
+            db.add_user_ad_message(uid, text, datetime.now(), photo_path=None, ad_type=ad_type)
             db.set_user_state(uid, "")
             await m.reply(
                 f"<blockquote><b>╰_╯ AD MESSAGE SET!✅</b></blockquote>\n\n"
@@ -1478,7 +1591,9 @@ async def handle_text_message(client, m):
                 reply_markup=kb([[InlineKeyboardButton("Dashboard 🚪", callback_data="menu_main")]])
             )
             await send_dm_log(uid, f"<b>❌ Failed to set ad message:</b> {str(e)}")
-    elif state == "waiting_broadcast_delay":
+        return
+
+    if state == "waiting_broadcast_delay":
         try:
             delay = int(text)
             if delay < 120:
@@ -1531,140 +1646,251 @@ async def handle_text_message(client, m):
                 reply_markup=kb([[InlineKeyboardButton("Dashboard", callback_data="menu_main")]])
             )
             await send_dm_log(uid, f"<b>❌ Failed to set broadcast interval:</b> {str(e)}")
-    elif state == "telethon_wait_phone":
-        if not validate_phone_number(text):
-            await m.reply(
-                f"<blockquote><b>❌ Invalid phone number!</b></blockquote>\n\n"
-                f"<u>Please use international format.</u>\n"
-                f"<i>Example: <code>+1234567890</code></i>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([[InlineKeyboardButton("Back", callback_data="menu_main")]])
-            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTO-REPLY CALLBACKS
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pyro.on_callback_query(filters.regex("^auto_reply_menu$"))
+async def auto_reply_menu(client, cb):
+    uid = cb.from_user.id
+    ar = db.get_auto_reply(uid)
+    enabled = ar.get("enabled", False)
+    message = ar.get("message", "")
+
+    status_label = "ON ✅" if enabled else "OFF ❌"
+    msg_preview = f"<code>{message[:100]}</code>" if message else "<i>Not set yet</i>"
+
+    caption = (
+        f"<blockquote><b>╰_╯ AUTO REPLY</b></blockquote>\n\n"
+        f"<b>Status:</b> {status_label}\n"
+        f"<b>Reply Message:</b>\n{msg_preview}\n\n"
+        f"<i>When enabled, your hosted accounts will automatically reply\n"
+        f"to anyone who DMs them with the message above.</i>"
+    )
+
+    toggle_label = "🔴 Disable" if enabled else "🟢 Enable"
+    await cb.message.edit_caption(
+        caption=caption,
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb([
+            [InlineKeyboardButton("✏️ Set Reply Message", callback_data="set_auto_reply_msg")],
+            [InlineKeyboardButton(toggle_label, callback_data="toggle_auto_reply")],
+            [InlineKeyboardButton("Back 🔙", callback_data="menu_main")]
+        ])
+    )
+
+
+@pyro.on_callback_query(filters.regex("^set_auto_reply_msg$"))
+async def set_auto_reply_msg_cb(client, cb):
+    uid = cb.from_user.id
+    db.set_user_state(uid, "waiting_auto_reply")
+    await cb.message.edit_caption(
+        caption=(
+            "<blockquote><b>╰_╯ SET AUTO REPLY MESSAGE</b></blockquote>\n\n"
+            "Send the message your hosted accounts should auto-reply with when someone DMs them.\n\n"
+            "<i>Example: Hi! I'm currently busy. Visit @YourChannel for updates.</i>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb([[InlineKeyboardButton("Cancel", callback_data="auto_reply_menu")]])
+    )
+
+
+@pyro.on_callback_query(filters.regex("^toggle_auto_reply$"))
+async def toggle_auto_reply(client, cb):
+    uid = cb.from_user.id
+    ar = db.get_auto_reply(uid)
+    new_state = not ar.get("enabled", False)
+
+    if new_state and not ar.get("message"):
+        await cb.answer("Set a reply message first!", show_alert=True)
+        return
+
+    db.set_auto_reply(uid, enabled=new_state)
+    status = "enabled ✅" if new_state else "disabled ❌"
+    await cb.answer(f"Auto reply {status}!", show_alert=True)
+    await send_dm_log(uid, f"<b>💬 Auto reply {status}</b>")
+    # Refresh the menu
+    await auto_reply_menu(client, cb)
+
+
+
+async def start_auto_reply_listeners(uid, tg_client, phone):
+    """Register a Telethon event handler on tg_client that auto-replies to private DMs."""
+    @tg_client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
+    async def _auto_reply_handler(event):
+        ar = db.get_auto_reply(uid)
+        if not ar.get("enabled") or not ar.get("message"):
             return
-        status_msg = await m.reply(
-            f"<blockquote><b>⏳ Hold! We’re trying to OTP...</b></blockquote>\n\n"
-            f"<u>Phone:</u> <code>{text}</code> \n"
-            f"<i>Please wait a moment.</i> ",
-            parse_mode=ParseMode.HTML
+        try:
+            sender = await event.get_sender()
+            if sender and getattr(sender, 'bot', False):
+                return
+            if event.sender_id == 777000:
+                return
+            await event.reply(ar["message"])
+            logger.info(f"Auto-replied to {event.sender_id} via {phone} for user {uid}")
+            await send_dm_log(uid, f"<b>💬 Auto-replied to</b> <code>{event.sender_id}</code> via {phone}")
+        except Exception as e:
+            logger.error(f"Auto-reply failed for {phone}: {e}")
+
+    logger.info(f"Auto-reply listener registered for account {phone} (owner: {uid})")
+
+
+async def _handle_telethon_phone(uid, text, m):
+    """Handle telethon_wait_phone state."""
+    if not validate_phone_number(text):
+        await m.reply(
+            f"<blockquote><b>❌ Invalid phone number!</b></blockquote>\n\n"
+            f"<u>Please use international format.</u>\n"
+            f"<i>Example: <code>+1234567890</code></i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("Back", callback_data="menu_main")]])
         )
-        try:
-            tg = TelegramClient(StringSession(), config.API_ID, config.API_HASH)
-            await tg.connect()
-            sent_code = await tg.send_code_request(text)
-            session_str = tg.session.save()
+        return
+    status_msg = await m.reply(
+        f"<blockquote><b>⏳ Hold! We're trying to OTP...</b></blockquote>\n\n"
+        f"<u>Phone:</u> <code>{text}</code> \n"
+        f"<i>Please wait a moment.</i> ",
+        parse_mode=ParseMode.HTML
+    )
+    try:
+        tg = TelegramClient(StringSession(), config.API_ID, config.API_HASH)
+        await tg.connect()
+        sent_code = await tg.send_code_request(text)
+        session_str = tg.session.save()
 
-            temp_dict = {
-                "phone": text,
-                "session_str": session_str,
-                "phone_code_hash": sent_code.phone_code_hash,
-                "otp": ""
-            }
+        temp_dict = {
+            "phone": text,
+            "session_str": session_str,
+            "phone_code_hash": sent_code.phone_code_hash,
+            "otp": ""
+        }
 
-            temp_json = json.dumps(temp_dict)
-            temp_encrypted = cipher_suite.encrypt(temp_json.encode()).decode()
-            db.set_temp_data(uid, temp_encrypted)
-            db.set_user_state(uid, "telethon_wait_otp")
+        temp_json = json.dumps(temp_dict)
+        temp_encrypted = cipher_suite.encrypt(temp_json.encode()).decode()
+        db.set_temp_data(uid, temp_encrypted)
+        db.set_user_state(uid, "telethon_wait_otp")
 
-            base_caption = (
-                f"<blockquote><b>╰_╯ OTP sent to <code>{text}</code>! ✅</b></blockquote>\n\n"
-                f"Enter the OTP using the keypad below\n"
-                f"<b>Current:</b> <code>_____</code>\n"
-                f"<b>Format:</b> <code>12345</code> (no spaces needed)\n"
-                f"<i>Valid for:</i> <u>{config.OTP_EXPIRY // 60} minutes</u>"
-            )
+        base_caption = (
+            f"<blockquote><b>╰_╯ OTP sent to <code>{text}</code>! ✅</b></blockquote>\n\n"
+            f"Enter the OTP using the keypad below\n"
+            f"<b>Current:</b> <code>_____</code>\n"
+            f"<b>Format:</b> <code>12345</code> (no spaces needed)\n"
+            f"<i>Valid for:</i> <u>{config.OTP_EXPIRY // 60} minutes</u>"
+        )
 
-            await status_msg.edit_caption(
-                base_caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_otp_keyboard()
-            )
-            await send_dm_log(uid, f"<b>╰_╯ OTP requested for phone number:</b> <code>{text}</code>")
-        except PhoneNumberInvalidError:
-            await status_msg.edit_caption(
-                f"<blockquote><b>❌ Invalid phone number! </b></blockquote>\n\n"
-                f"<u>Please check the number and try again.</u>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([[InlineKeyboardButton("Back", callback_data="menu_main")]])
-            )
-        except Exception as e:
-            logger.error(f"Failed to send OTP for {uid}: {e}")
-            db.set_user_state(uid, "")
-            await status_msg.edit_caption(
-                f"<blockquote><b>❌ Failed to send OTP!</b></blockquote>\n\n"
-                f"<u>Error:</u> <i>{str(e)}</i>\n"
-                f"<b>Contact support:</b> @{config.ADMIN_USERNAME}",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([[InlineKeyboardButton("Back", callback_data="menu_main")]])
-            )
-            await send_dm_log(uid, f"<b>❌ Failed to send OTP for phone:</b> {str(e)}")
-        finally:
-            await tg.disconnect()
+        await status_msg.edit_caption(
+            base_caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_otp_keyboard()
+        )
+        await send_dm_log(uid, f"<b>╰_╯ OTP requested for phone number:</b> <code>{text}</code>")
+    except PhoneNumberInvalidError:
+        await status_msg.edit_caption(
+            f"<blockquote><b>❌ Invalid phone number! </b></blockquote>\n\n"
+            f"<u>Please check the number and try again.</u>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("Back", callback_data="menu_main")]])
+        )
+    except Exception as e:
+        logger.error(f"Failed to send OTP for {uid}: {e}")
+        db.set_user_state(uid, "")
+        await status_msg.edit_caption(
+            f"<blockquote><b>❌ Failed to send OTP!</b></blockquote>\n\n"
+            f"<u>Error:</u> <i>{str(e)}</i>\n"
+            f"<b>Contact support:</b> @{config.ADMIN_USERNAME}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("Back", callback_data="menu_main")]])
+        )
+        await send_dm_log(uid, f"<b>❌ Failed to send OTP for phone:</b> {str(e)}")
+    finally:
+        await tg.disconnect()
+
+
+async def _handle_telethon_password(uid, text, m):
+    """Handle telethon_wait_password state."""
+    temp_encrypted = db.get_temp_data(uid)
+    if not temp_encrypted:
+        await m.reply(
+            f"<blockquote><b>❌ Session expired!</b></blockquote>\n\n"
+            f"<u>Please restart the process.</u>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("Back", callback_data="menu_main")]])
+        )
+        db.set_user_state(uid, "")
+        return
+
+    try:
+        temp_json = cipher_suite.decrypt(temp_encrypted.encode()).decode()
+        temp_dict = json.loads(temp_json)
+        phone = temp_dict["phone"]
+        session_str = temp_dict["session_str"]
+    except (json.JSONDecodeError, Fernet.InvalidToken) as e:
+        logger.error(f"Invalid temp data for user {uid} in 2FA: {e}")
+        await m.reply(
+            f"<blockquote><b>❌ Corrupted session data!</b></blockquote>\n\n"
+            f"<b>Please restart the process.</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("Back", callback_data="menu_main")]])
+        )
+        db.set_user_state(uid, "")
+        db.set_temp_data(uid, None)
+        return
+
+    tg = TelegramClient(StringSession(session_str), config.API_ID, config.API_HASH)
+    try:
+        await tg.connect()
+        await tg.sign_in(password=text)
+        session_encrypted = cipher_suite.encrypt(session_str.encode()).decode()
+        db.add_user_account(uid, phone, session_encrypted)
+        await m.reply(
+            f"<blockquote><b>╰_╯Account added!✅ </b></blockquote>\n\n"
+            f"<u>Phone:</u> <code>{phone}</code>\n"
+            "•Account is ready for broadcasting!",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("Dashboard", callback_data="menu_main")]])
+        )
+        await send_dm_log(uid, f"<b>╰_╯Account added successfully ✅:</b> <code>{phone}</code> ✨")
+        db.set_user_state(uid, "")
+        db.set_temp_data(uid, None)
+    except PasswordHashInvalidError:
+        await m.reply(
+            f"<blockquote><b>⚠️ Invalid password!</b></blockquote>\n\n"
+            f"<u>Please try again.</u>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("Back 🔙", callback_data="menu_main")]])
+        )
+    except Exception as e:
+        logger.error(f"Failed to sign in with password for {uid}: {e}")
+        db.set_user_state(uid, "")
+        db.set_temp_data(uid, None)
+        await m.reply(
+            f"<blockquote><b>❌ Login failed!</b></blockquote>\n\n"
+            f"<u>Error:</u> <i>{str(e)}</i>\n"
+            f"<b>Contact support:</b> @{config.ADMIN_USERNAME}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("Dashboard 🚪", callback_data="menu_main")]])
+        )
+        await send_dm_log(uid, f"<b>╰_╯Account login failed:❌</b> {str(e)}")
+    finally:
+        await tg.disconnect()
+
+
+# Wire telethon phone/password states into handle_text_message
+@pyro.on_message(filters.text & filters.private & ~filters.command(["start", "bd", "me", "stats", "stop"]))
+async def handle_telethon_states(client, m):
+    """Handles telethon_wait_phone and telethon_wait_password states."""
+    uid = m.from_user.id
+    state = db.get_user_state(uid)
+    text = m.text.strip()
+
+    if state == "telethon_wait_phone":
+        await _handle_telethon_phone(uid, text, m)
     elif state == "telethon_wait_password":
-        temp_encrypted = db.get_temp_data(uid)
-        if not temp_encrypted:
-            await m.reply(
-                f"<blockquote><b>❌ Session expired!</b></blockquote>\n\n"
-                f"<u>Please restart the process.</u>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([[InlineKeyboardButton("Back", callback_data="menu_main")]])
-            )
-            db.set_user_state(uid, "")
-            return
+        await _handle_telethon_password(uid, text, m)
 
-        try:
-            temp_json = cipher_suite.decrypt(temp_encrypted.encode()).decode()
-            temp_dict = json.loads(temp_json)
-            phone = temp_dict["phone"]
-            session_str = temp_dict["session_str"]
-        except (json.JSONDecodeError, Fernet.InvalidToken) as e:
-            logger.error(f"Invalid temp data for user {uid} in 2FA: {e}")
-            await m.reply(
-                f"<blockquote><b>❌ Corrupted session data!</b></blockquote>\n\n"
-                f"<b>Please restart the process.</b>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([[InlineKeyboardButton("Back", callback_data="menu_main")]])
-            )
-            db.set_user_state(uid, "")
-            db.set_temp_data(uid, None)
-            return
-
-        tg = TelegramClient(StringSession(session_str), config.API_ID, config.API_HASH)
-        try:
-            await tg.connect()
-            await tg.sign_in(password=text)
-            session_encrypted = cipher_suite.encrypt(session_str.encode()).decode()
-            db.add_user_account(uid, phone, session_encrypted)
-            await m.reply(
-                f"<blockquote><b>╰_╯Account added!✅ </b></blockquote>\n\n"
-                f"<u>Phone:</u> <code>{phone}</code>\n"
-                "•Account is ready for broadcasting!",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([[InlineKeyboardButton("Dashboard", callback_data="menu_main")]])
-            )
-            await send_dm_log(uid, f"<b>╰_╯Account added successfully ✅:</b> <code>{phone}</code> ✨")
-            db.set_user_state(uid, "")
-            db.set_temp_data(uid, None)
-        except PasswordHashInvalidError:
-            await m.reply(
-                f"<blockquote><b>⚠️ Invalid password!</b></blockquote>\n\n"
-                f"<u>Please try again.</u>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([[InlineKeyboardButton("Back 🔙", callback_data="menu_main")]])
-            )
-        except Exception as e:
-            logger.error(f"Failed to sign in with password for {uid}: {e}")
-            db.set_user_state(uid, "")
-            db.set_temp_data(uid, None)
-            await m.reply(
-                f"<blockquote><b>❌ Login failed!</b></blockquote>\n\n"
-                f"<u>Error:</u> <i>{str(e)}</i>\n"
-                f"<b>Contact support:</b> @{config.ADMIN_USERNAME}",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([[InlineKeyboardButton("Dashboard 🚪", callback_data="menu_main")]])
-            )
-            await send_dm_log(uid, f"<b>╰_╯Account login failed:❌</b> {str(e)}")
-        finally:
-            await tg.disconnect()
 
 async def main():
     await pyro.start()
