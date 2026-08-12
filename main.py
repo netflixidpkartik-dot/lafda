@@ -371,10 +371,12 @@ async def run_broadcast(client, uid, account_ids=None):
         cycle_count = 0
 
         db_msgs = db.get_user_ad_messages(uid)
-        fallback_text = db_msgs[0].get("message") if db_msgs else None
-        fallback_photo = db_msgs[0].get("photo_path") if db_msgs else None
-        fallback_ad_type = db_msgs[0].get("ad_type", "text") if db_msgs else "text"
-        fallback_entities = db_msgs[0].get("entities", []) if db_msgs else []
+        fallback_text       = db_msgs[0].get("message") if db_msgs else None
+        fallback_photo      = db_msgs[0].get("photo_path") if db_msgs else None
+        fallback_ad_type    = db_msgs[0].get("ad_type", "text") if db_msgs else "text"
+        fallback_entities   = db_msgs[0].get("entities", []) if db_msgs else []
+        fallback_from_chat  = db_msgs[0].get("from_chat_id") if db_msgs else None
+        fallback_message_id = db_msgs[0].get("message_id") if db_msgs else None
 
         delay = db.get_user_ad_delay(uid)
         all_accounts = db.get_user_accounts(uid)
@@ -460,9 +462,11 @@ async def run_broadcast(client, uid, account_ids=None):
             while db.get_broadcast_state(uid).get("running", False):
 
                 # Re-read DB ad settings at start of each cycle (user may have updated them)
-                db_msgs_fresh = db.get_user_ad_messages(uid)
-                active_ad_type = db_msgs_fresh[0].get("ad_type", fallback_ad_type) if db_msgs_fresh else fallback_ad_type
+                db_msgs_fresh     = db.get_user_ad_messages(uid)
+                active_ad_type    = db_msgs_fresh[0].get("ad_type", fallback_ad_type)    if db_msgs_fresh else fallback_ad_type
                 active_entities_data = db_msgs_fresh[0].get("entities", fallback_entities) if db_msgs_fresh else fallback_entities
+                active_from_chat  = db_msgs_fresh[0].get("from_chat_id", fallback_from_chat)   if db_msgs_fresh else fallback_from_chat
+                active_message_id = db_msgs_fresh[0].get("message_id",  fallback_message_id)   if db_msgs_fresh else fallback_message_id
 
                 # Fetch latest ad message/media from channel at the start of every cycle
                 channel_caption, channel_media = None, None
@@ -525,16 +529,34 @@ async def run_broadcast(client, uid, account_ids=None):
                         try:
                             varied_caption = vary_message(active_caption or "")
 
-                            # Convert saved entities to Telethon format (preserves premium emojis)
+                            # Convert saved entities to Telethon format (preserves bold/italic/etc.)
                             tl_entities = pyrogram_entities_to_telethon(active_entities_data)
 
-                            # Send based on active_ad_type
+                            # ── Send / Forward ─────────────────────────────────────────────────
                             if active_media and active_ad_type in ("photo", "both"):
+                                # Photo: always send_file (can't forward photos this way reliably)
                                 await tg_client.send_file(
                                     gid, file=active_media, caption=varied_caption,
                                     formatting_entities=tl_entities
                                 )
-                            elif active_caption and active_ad_type == "text":
+                            elif active_ad_type == "text" and active_from_chat and active_message_id:
+                                # Text with a saved origin → FORWARD (100% preserves premium emojis)
+                                try:
+                                    await tg_client.forward_messages(
+                                        entity=gid,
+                                        messages=active_message_id,
+                                        from_peer=active_from_chat,
+                                        drop_author=True,  # hides "Forwarded from" header
+                                    )
+                                except Exception as fwd_err:
+                                    # Forward failed (message deleted / no access) → fall back to entity send
+                                    logger.warning(f"Forward failed for {phone}→{gid}: {fwd_err} — using entity send")
+                                    await tg_client.send_message(
+                                        gid, varied_caption,
+                                        formatting_entities=tl_entities
+                                    )
+                            elif active_caption:
+                                # Text without saved origin (old ad) → entity send
                                 await tg_client.send_message(
                                     gid, varied_caption,
                                     formatting_entities=tl_entities
@@ -1820,13 +1842,20 @@ async def handle_text_message(client, m):
 
             # Capture message entities (premium emojis, bold, etc.)
             msg_entities = entities_to_dict(m.entities or [])
+            # Save message origin so broadcast can forward it (preserves ALL formatting server-side)
+            from_chat_id = m.chat.id
+            message_id   = m.id
 
             db.add_user_ad_message(
                 uid, text, datetime.now(),
                 photo_path=None, ad_type=ad_type,
-                entities=msg_entities
+                entities=msg_entities,
+                from_chat_id=from_chat_id,
+                message_id=message_id
             )
             db.set_user_state(uid, "")
+            entity_count = len(msg_entities)
+            logger.info(f"Ad text set for {uid}: {len(text)} chars, {entity_count} entities, msg_id={message_id}")
             await m.reply(
                 f"<blockquote><b>╰_╯ AD MESSAGE SET!✅</b></blockquote>\n\n"
                 f"<u>Message Preview:</u>\n<code>{text}</code>\n\n"
