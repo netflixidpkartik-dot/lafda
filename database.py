@@ -286,15 +286,23 @@ class EnhancedDatabaseManager:
             logger.error(f"Failed to get ad messages for {user_id}: {e}")
             return []
 
-    def add_user_ad_message(self, user_id, message, created_at):
-        """Add an ad message for a user."""
+    def add_user_ad_message(self, user_id, message, created_at, photo_path=None):
+        """Add an ad message for a user, with optional photo_path."""
         try:
+            update_data = {
+                "message": message,
+                "created_at": created_at,
+                "updated_at": datetime.now()
+            }
+            if photo_path is not None:
+                update_data["photo_path"] = photo_path
+            
             self.db.ad_messages.update_one(
                 {"user_id": user_id},
-                {"$set": {"message": message, "created_at": created_at, "updated_at": datetime.now()}},
+                {"$set": update_data},
                 upsert=True
             )
-            logger.info(f"Ad message added for user {user_id}")
+            logger.info(f"Ad message added for user {user_id} (photo_path={photo_path})")
         except Exception as e:
             logger.error(f"Failed to add ad message for {user_id}: {e}")
             raise

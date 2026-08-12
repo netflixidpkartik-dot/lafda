@@ -22,10 +22,22 @@ from pyrogram.errors import UserNotParticipant, PeerIdInvalid, ChatWriteForbidde
 from pyrogram.enums import ParseMode, ChatType
 import config
 from database import EnhancedDatabaseManager
-from utils import validate_phone_number, generate_progress_bar, format_duration
 import os
 import logging
 from cryptography.fernet import Fernet
+
+# Helper functions
+def validate_phone_number(phone):
+    pattern = r"^\+[1-9]\d{1,14}$"
+    return bool(re.match(pattern, phone))
+
+def generate_progress_bar(current, total, length=10):
+    if total <= 0:
+        return "[░░░░░░░░░░] 0%"
+    percent = current / total
+    filled = int(length * percent)
+    bar = "█" * filled + "░" * (length - filled)
+    return f"[{bar}] {int(percent * 100)}%"
 
 # Logging setup
 os.makedirs('logs', exist_ok=True)
@@ -110,6 +122,8 @@ INVISIBLE_CHARS = ["\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"]
 
 def vary_message(msg: str) -> str:
     """Append a random invisible character so each send has a unique fingerprint."""
+    if not msg:
+        return ""
     return msg + random.choice(INVISIBLE_CHARS)
 
 
@@ -240,17 +254,18 @@ async def stop_broadcast_task(uid):
     return True
 
 async def get_channel_ad_message(tg_client):
-    """Fetch the latest message from the owner's ad source channel.
-    Returns (text, entities) tuple to preserve premium emojis."""
+    """Fetch the latest message (text or media) from the owner's ad source channel."""
     try:
         channel = await tg_client.get_entity(config.AD_SOURCE_CHANNEL)
         messages = await tg_client.get_messages(channel, limit=1)
-        if messages and messages[0]:
+        if messages:
             msg = messages[0]
-            text = msg.text or msg.message or ""
-            if text:
-                return text, msg.entities  # entities preserve premium emojis!
-        logger.warning("No text message found in AD_SOURCE_CHANNEL")
+            # Return tuple: (text/caption, media_obj)
+            caption = msg.text or ""
+            media = msg.media if msg.media else None
+            if caption or media:
+                return caption, media
+        logger.warning("No message found in AD_SOURCE_CHANNEL")
         return None, None
     except Exception as e:
         logger.error(f"Failed to fetch ad message from channel: {e}")
@@ -266,8 +281,8 @@ async def run_broadcast(client, uid):
         # msg is fetched fresh from the channel each cycle (set below)
         # Fallback to DB if channel fetch fails
         db_msgs = db.get_user_ad_messages(uid)
-        fallback_msg = db_msgs[0]["message"] if db_msgs else None
-        fallback_entities = None  # DB messages have no entities
+        fallback_text = db_msgs[0].get("message") if db_msgs else None
+        fallback_photo = db_msgs[0].get("photo_path") if db_msgs else None
 
         delay = db.get_user_ad_delay(uid)
         accounts = db.get_user_accounts(uid)
@@ -345,17 +360,19 @@ async def run_broadcast(client, uid):
         try:
             while db.get_broadcast_state(uid).get("running", False):
 
-                # Fetch latest ad message from channel at the start of every cycle
-                msg, msg_entities = None, None
+                # Fetch latest ad message/media from channel at the start of every cycle
+                channel_caption, channel_media = None, None
                 for acc_id, (tg_c, _, _ph) in clients.items():
-                    msg, msg_entities = await get_channel_ad_message(tg_c)
-                    if msg:
+                    channel_caption, channel_media = await get_channel_ad_message(tg_c)
+                    if channel_caption or channel_media:
                         break
-                if not msg:
-                    msg = fallback_msg
-                    msg_entities = fallback_entities
-                if not msg:
-                    await client.send_message(uid, "No ad message found in channel or DB. Please post a message in your ad channel first.", parse_mode=ParseMode.HTML)
+                
+                # Determine active message content & media
+                active_caption = channel_caption if (channel_caption or channel_media) else fallback_text
+                active_media = channel_media if (channel_caption or channel_media) else fallback_photo
+
+                if not active_caption and not active_media:
+                    await client.send_message(uid, "No ad message or photo found in channel or DB. Please set an ad message/photo first.", parse_mode=ParseMode.HTML)
                     db.set_broadcast_state(uid, running=False)
                     break
 
@@ -388,17 +405,17 @@ async def run_broadcast(client, uid):
                                 break
 
                         try:
-                            varied_msg = vary_message(msg)
-                            # Use formatting_entities to preserve premium emojis
-                            await tg_client.send_message(
-                                gid,
-                                varied_msg,
-                                formatting_entities=msg_entities,
-                                link_preview=False
-                            )
+                            varied_caption = vary_message(active_caption or "")
+                            
+                            # If media is present, send with send_file
+                            if active_media:
+                                await tg_client.send_file(gid, file=active_media, caption=varied_caption)
+                            else:
+                                await tg_client.send_message(gid, varied_caption)
+                                
                             sent_count += 1
                             db.increment_broadcast_stats(uid, True)
-                            logger.info(f"Sent to {group_name} ({gid}) via {phone}")
+                            logger.info(f"Sent ad to {group_name} ({gid}) via {phone}")
                             await send_dm_log(uid, f"<b>✅ Sent to {group_name}</b> via {phone}")
 
                         except FloodWaitError as e:
@@ -691,7 +708,19 @@ async def menu_main(client, cb):
         
         accounts_count = db.get_user_accounts_count(uid)
         saved_msgs = db.get_user_ad_messages(uid)
-        ad_msg_status = "Set ✅" if saved_msgs else "Not Set ⭕"
+        
+        ad_msg_status = "Not Set ⭕"
+        if saved_msgs:
+            msg_doc = saved_msgs[0]
+            has_photo = bool(msg_doc.get("photo_path"))
+            has_text = bool(msg_doc.get("message"))
+            if has_photo and has_text:
+                ad_msg_status = "Set (Photo + Text) 🖼️📝"
+            elif has_photo:
+                ad_msg_status = "Set (Photo Only) 🖼️"
+            elif has_text:
+                ad_msg_status = "Set (Text Only) 📝"
+
         current_delay = db.get_user_ad_delay(uid)
         broadcast_state = db.get_broadcast_state(uid)
         running = broadcast_state.get("running", False)
@@ -709,13 +738,12 @@ async def menu_main(client, cb):
         menu = [
             [InlineKeyboardButton("Add Accounts", callback_data="host_account"),
              InlineKeyboardButton("My Accounts", callback_data="view_accounts")],
-            [InlineKeyboardButton("Set Ad Message", callback_data="set_msg"),
+            [InlineKeyboardButton("Set Ad Message/Photo 📸", callback_data="set_msg"),
              InlineKeyboardButton("Set Time Interval", callback_data="set_delay")],
             [InlineKeyboardButton("Start Ads▶️", callback_data="start_broadcast"),
              InlineKeyboardButton("Stop Ads⏸️", callback_data="stop_broadcast")],
             [InlineKeyboardButton("Delete Accounts", callback_data="delete_accounts"),
-             InlineKeyboardButton("Analytics", callback_data="analytics")],
-            [InlineKeyboardButton("Auto Reply", callback_data="auto_reply")]
+             InlineKeyboardButton("Analytics", callback_data="analytics")]
         ]
         
         try:
@@ -882,22 +910,34 @@ async def set_msg(client, cb):
     uid = cb.from_user.id
     db.set_user_state(uid, "waiting_broadcast_msg")
     saved_msgs = db.get_user_ad_messages(uid)
-    current_msg = saved_msgs[0]["message"] if saved_msgs else "None set"
     
+    current_msg = "None set"
+    if saved_msgs:
+        msg_doc = saved_msgs[0]
+        text_content = msg_doc.get("message", "")
+        photo_content = msg_doc.get("photo_path")
+        if photo_content and text_content:
+            current_msg = f"[Photo Attached 🖼️]\n{text_content}"
+        elif photo_content:
+            current_msg = "[Photo Only 🖼️]"
+        elif text_content:
+            current_msg = text_content
+
     current_msg_section = f"\n\n<blockquote><b>Current Ad Message:</b>\n{current_msg}</blockquote>" if current_msg != "None set" else "\n\n<blockquote><b>Current Ad Message:</b>\nNo message set yet.</blockquote>"
     
     await cb.message.edit_media(
         media=InputMediaPhoto(
             media=config.START_IMAGE,
-            caption=f"""<blockquote>╰_╯ <b>SET YOUR AD MESSAGE</b></blockquote>{current_msg_section}
+            caption=f"""<blockquote>╰_╯ <b>SET YOUR AD MESSAGE OR PHOTO</b></blockquote>{current_msg_section}
 
 Tips for effective ads:
+•You can now send a <b>Photo</b> (with optional text caption) or a <b>Text message</b>! 🖼️📝
 •Keep it concise and engaging
 •Use premium emojis for flair
 •Include clear call-to-action
 •Avoid excessive caps or spam words
 
-<blockquote>Send your ad message now:</blockquote>""",
+<blockquote>Send your photo or text ad message now:</blockquote>""",
             parse_mode=ParseMode.HTML
         ),
         reply_markup=kb([[InlineKeyboardButton("Back", callback_data="menu_main")]])
@@ -1065,158 +1105,6 @@ async def stop_broadcast(client, cb):
         )
     await send_dm_log(uid, f"<b>╰_╯ Broadcast stopped!</b>")
     logger.info(f"Broadcast stopped via callback for user {uid}")
-
-def auto_reply_menu_markup(uid):
-    """Build the auto reply menu keyboard."""
-    enabled = db.get_auto_reply_enabled(uid)
-    toggle_label = "🟢 ON — Disable" if enabled else "🔴 OFF — Enable"
-    return kb([
-        [InlineKeyboardButton("➕ Add Rule", callback_data="ar_add"),
-         InlineKeyboardButton("📋 My Rules", callback_data="ar_list")],
-        [InlineKeyboardButton(f"Toggle: {toggle_label}", callback_data="ar_toggle")],
-        [InlineKeyboardButton("Back 🔙", callback_data="menu_main")]
-    ])
-
-@pyro.on_callback_query(filters.regex("^auto_reply$"))
-async def auto_reply(client, cb):
-    uid = cb.from_user.id
-    enabled = db.get_auto_reply_enabled(uid)
-    rules = db.get_auto_reply_rules(uid)
-    status = "🟢 Enabled" if enabled else "🔴 Disabled"
-    await cb.message.edit_text(
-        f"<blockquote><b>╰_╯ AUTO REPLY</b></blockquote>\n\n"
-        f"Status: <b>{status}</b>\n"
-        f"Rules saved: <code>{len(rules)}</code>\n\n"
-        "Auto-reply watches incoming messages on your hosted accounts and "
-        "replies automatically when a keyword is matched.",
-        reply_markup=auto_reply_menu_markup(uid),
-        parse_mode=ParseMode.HTML
-    )
-
-@pyro.on_callback_query(filters.regex("^ar_toggle$"))
-async def ar_toggle(client, cb):
-    uid = cb.from_user.id
-    current = db.get_auto_reply_enabled(uid)
-    db.set_auto_reply_enabled(uid, not current)
-    status = "🟢 Enabled" if not current else "🔴 Disabled"
-    await cb.answer(f"Auto-reply {status}", show_alert=False)
-    rules = db.get_auto_reply_rules(uid)
-    await cb.message.edit_text(
-        f"<blockquote><b>╰_╯ AUTO REPLY</b></blockquote>\n\n"
-        f"Status: <b>{status}</b>\n"
-        f"Rules saved: <code>{len(rules)}</code>\n\n"
-        "Auto-reply watches incoming messages on your hosted accounts and "
-        "replies automatically when a keyword is matched.",
-        reply_markup=auto_reply_menu_markup(uid),
-        parse_mode=ParseMode.HTML
-    )
-
-@pyro.on_callback_query(filters.regex("^ar_add$"))
-async def ar_add(client, cb):
-    uid = cb.from_user.id
-    db.set_user_state(uid, "ar_wait_keyword")
-    await cb.message.edit_text(
-        "<blockquote><b>╰_╯ ADD AUTO REPLY — Step 1/2</b></blockquote>\n\n"
-        "Send the <b>keyword</b> you want to trigger the reply.\n\n"
-        "<i>Example:</i> <code>price</code>\n"
-        "When someone sends a message containing this word, your reply will be sent automatically.",
-        reply_markup=kb([[InlineKeyboardButton("Cancel 🔙", callback_data="auto_reply")]]),
-        parse_mode=ParseMode.HTML
-    )
-
-@pyro.on_callback_query(filters.regex("^ar_list$"))
-async def ar_list(client, cb):
-    uid = cb.from_user.id
-    rules = db.get_auto_reply_rules(uid)
-    if not rules:
-        await cb.message.edit_text(
-            "<blockquote><b>╰_╯ MY AUTO REPLY RULES</b></blockquote>\n\n"
-            "No rules set yet. Use <b>Add Rule</b> to create one.",
-            reply_markup=kb([
-                [InlineKeyboardButton("➕ Add Rule", callback_data="ar_add")],
-                [InlineKeyboardButton("Back 🔙", callback_data="auto_reply")]
-            ]),
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    caption = "<blockquote><b>╰_╯ MY AUTO REPLY RULES</b></blockquote>\n\n"
-    buttons = []
-    for i, rule in enumerate(rules, 1):
-        kw = rule["keyword"]
-        reply_preview = rule["reply_text"][:30] + ("…" if len(rule["reply_text"]) > 30 else "")
-        caption += f"{i}. Keyword: <code>{kw}</code>\n   Reply: <i>{reply_preview}</i>\n\n"
-        buttons.append([InlineKeyboardButton(f"🗑 Delete: {kw}", callback_data=f"ar_del_{rule['_id']}")])
-    buttons.append([InlineKeyboardButton("Back 🔙", callback_data="auto_reply")])
-
-    await cb.message.edit_text(
-        caption,
-        reply_markup=kb(buttons),
-        parse_mode=ParseMode.HTML
-    )
-
-@pyro.on_callback_query(filters.regex("^ar_del_"))
-async def ar_delete(client, cb):
-    uid = cb.from_user.id
-    rule_id = cb.data.replace("ar_del_", "")
-    try:
-        db.delete_auto_reply_rule(uid, rule_id)
-        await cb.answer("Rule deleted ✅", show_alert=False)
-    except Exception as e:
-        await cb.answer(f"Error: {e}", show_alert=True)
-        return
-    # Refresh the list
-    rules = db.get_auto_reply_rules(uid)
-    if not rules:
-        await cb.message.edit_text(
-            "<blockquote><b>╰_╯ MY AUTO REPLY RULES</b></blockquote>\n\n"
-            "No rules left. Use <b>Add Rule</b> to create one.",
-            reply_markup=kb([
-                [InlineKeyboardButton("➕ Add Rule", callback_data="ar_add")],
-                [InlineKeyboardButton("Back 🔙", callback_data="auto_reply")]
-            ]),
-            parse_mode=ParseMode.HTML
-        )
-        return
-    caption = "<blockquote><b>╰_╯ MY AUTO REPLY RULES</b></blockquote>\n\n"
-    buttons = []
-    for i, rule in enumerate(rules, 1):
-        kw = rule["keyword"]
-        reply_preview = rule["reply_text"][:30] + ("…" if len(rule["reply_text"]) > 30 else "")
-        caption += f"{i}. Keyword: <code>{kw}</code>\n   Reply: <i>{reply_preview}</i>\n\n"
-        buttons.append([InlineKeyboardButton(f"🗑 Delete: {kw}", callback_data=f"ar_del_{rule['_id']}")])
-    buttons.append([InlineKeyboardButton("Back 🔙", callback_data="auto_reply")])
-    await cb.message.edit_text(caption, reply_markup=kb(buttons), parse_mode=ParseMode.HTML)
-
-# ── Auto Reply incoming message listener (runs on hosted Telethon accounts) ──
-
-async def run_auto_reply_listener(uid):
-    """Start Telethon listeners for all accounts of a user to handle auto-reply."""
-    accounts = db.get_user_accounts(uid)
-    for acc in accounts:
-        try:
-            session_str = cipher_suite.decrypt(acc['session_string'].encode()).decode()
-            tg = TelegramClient(StringSession(session_str), config.API_ID, config.API_HASH)
-            await tg.start()
-
-            @tg.on(events.NewMessage(incoming=True))
-            async def handler(event, _tg=tg, _uid=uid):
-                if not db.get_auto_reply_enabled(_uid):
-                    return
-                rules = db.get_auto_reply_rules(_uid)
-                text = (event.message.text or "").lower()
-                for rule in rules:
-                    if rule["keyword"] in text:
-                        try:
-                            await event.reply(rule["reply_text"])
-                            logger.info(f"Auto-replied to message in chat {event.chat_id} with keyword '{rule['keyword']}'")
-                        except Exception as e:
-                            logger.warning(f"Auto-reply failed in chat {event.chat_id}: {e}")
-                        break  # only first matching rule fires per message
-
-            logger.info(f"Auto-reply listener started for account {acc['phone_number']} (user {uid})")
-        except Exception as e:
-            logger.error(f"Failed to start auto-reply listener for account {acc['phone_number']}: {e}")
 
 @pyro.on_callback_query(filters.regex("analytics"))
 async def analytics(client, cb):
@@ -1437,7 +1325,7 @@ async def user_info(client, m):
         f"<b>Logger Active:</b>{'Yes ✅' if db.get_logger_status(uid) else 'No ❌'}\n"
         "<b>Features:</b>\n"
         "•Up to 5 account hosting\n"
-        "•Automated broadcasting\n"
+        "•Automated broadcasting (Text & Photos)\n"
         "•Group targeting\n"
         "•Real-time analytics\n"
         "•DM logging via logger bot\n"
@@ -1521,6 +1409,43 @@ async def handle_group_link(client, m):
         await send_dm_log(uid, f"<b>❌ Failed to add group:</b> {str(e)} 😔")
         logger.error(f"Failed to add group for {uid}: {e}")
 
+@pyro.on_message(filters.photo & filters.private)
+async def handle_photo_message(client, m):
+    uid = m.from_user.id
+    state = db.get_user_state(uid)
+    if state == "waiting_broadcast_msg":
+        try:
+            os.makedirs("downloads", exist_ok=True)
+            photo_file = await client.download_media(m.photo, file_name=f"downloads/{uid}_ad.jpg")
+            caption = m.caption or ""
+            
+            db.add_user_ad_message(uid, caption, datetime.now(), photo_path=photo_file)
+            db.set_user_state(uid, "")
+            
+            caption_preview = f"<code>{caption}</code>" if caption else "<i>No text caption</i>"
+            await m.reply(
+                f"<blockquote><b>╰_╯ AD PHOTO SET! ✅</b></blockquote>\n\n"
+                f"<u>Photo Saved:</u> Yes 🖼️\n"
+                f"<u>Caption Preview:</u>\n{caption_preview}\n\n"
+                f"<b>Ready to broadcast!</b>\n"
+                f"<i>Start your campaign from the dashboard.</i>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb([[InlineKeyboardButton("Dashboard 🚪", callback_data="menu_main")]])
+            )
+            await send_dm_log(uid, f"<b>🖼️ Ad Photo updated!</b> Caption: <code>{caption[:50] if caption else 'None'}</code>")
+            logger.info(f"Ad photo set for user {uid}: path={photo_file}")
+        except Exception as e:
+            logger.error(f"Failed to add ad photo for user {uid}: {e}")
+            db.set_user_state(uid, "")
+            await m.reply(
+                f"<blockquote><b>❌ Failed to save ad photo!</b></blockquote>\n\n"
+                f"<u>Error:</u> <i>{str(e)}</i>\n"
+                f"<b>Contact Support:</b> @{config.ADMIN_USERNAME}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb([[InlineKeyboardButton("Dashboard 🚪", callback_data="menu_main")]])
+            )
+            await send_dm_log(uid, f"<b>❌ Failed to set ad photo:</b> {str(e)}")
+
 @pyro.on_message(filters.text & filters.private & ~filters.command(["start", "bd", "me", "stats", "stop"]))
 async def handle_text_message(client, m):
     uid = m.from_user.id
@@ -1529,7 +1454,8 @@ async def handle_text_message(client, m):
     
     if state == "waiting_broadcast_msg":
         try:
-            db.add_user_ad_message(uid, text, datetime.now())
+            # Setting text message clears existing saved photo_path if any (or keeps photo_path=None)
+            db.add_user_ad_message(uid, text, datetime.now(), photo_path=None)
             db.set_user_state(uid, "")
             await m.reply(
                 f"<blockquote><b>╰_╯ AD MESSAGE SET!✅</b></blockquote>\n\n"
@@ -1739,60 +1665,6 @@ async def handle_text_message(client, m):
             await send_dm_log(uid, f"<b>╰_╯Account login failed:❌</b> {str(e)}")
         finally:
             await tg.disconnect()
-    elif state == "ar_wait_keyword":
-        keyword = text.lower().strip()
-        if not keyword or len(keyword) > 50:
-            await m.reply(
-                "<blockquote><b>❌ Invalid keyword!</b></blockquote>\n\n"
-                "Keyword must be between 1–50 characters. Please try again.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([[InlineKeyboardButton("Cancel 🔙", callback_data="auto_reply")]])
-            )
-            return
-        # Store keyword temporarily and ask for reply message
-        db.set_user_temp_data(uid, "ar_keyword", keyword)
-        db.set_user_state(uid, "ar_wait_reply")
-        await m.reply(
-            f"<blockquote><b>╰_╯ ADD AUTO REPLY — Step 2/2</b></blockquote>\n\n"
-            f"Keyword saved: <code>{keyword}</code>\n\n"
-            "Now send the <b>reply message</b> that will be sent when this keyword is detected.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb([[InlineKeyboardButton("Cancel 🔙", callback_data="auto_reply")]])
-        )
-    elif state == "ar_wait_reply":
-        keyword = db.get_user_temp_data(uid, "ar_keyword")
-        if not keyword:
-            db.set_user_state(uid, "")
-            await m.reply(
-                "<blockquote><b>❌ Session expired.</b></blockquote>\n\nPlease start again.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([[InlineKeyboardButton("Auto Reply 🔙", callback_data="auto_reply")]])
-            )
-            return
-        try:
-            db.add_auto_reply_rule(uid, keyword, text)
-            db.set_user_state(uid, "")
-            await m.reply(
-                f"<blockquote><b>✅ Auto Reply Rule Saved!</b></blockquote>\n\n"
-                f"Keyword: <code>{keyword}</code>\n"
-                f"Reply: <i>{text[:100]}{'…' if len(text) > 100 else ''}</i>\n\n"
-                "This reply will fire automatically when the keyword is detected in any incoming message on your hosted accounts.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([
-                    [InlineKeyboardButton("➕ Add Another", callback_data="ar_add")],
-                    [InlineKeyboardButton("📋 My Rules", callback_data="ar_list")],
-                    [InlineKeyboardButton("Dashboard 🚪", callback_data="menu_main")]
-                ])
-            )
-            logger.info(f"Auto-reply rule added for user {uid}: keyword='{keyword}'")
-        except Exception as e:
-            logger.error(f"Failed to save auto-reply rule for user {uid}: {e}")
-            db.set_user_state(uid, "")
-            await m.reply(
-                f"<blockquote><b>❌ Failed to save rule!</b></blockquote>\n\nError: {str(e)}",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([[InlineKeyboardButton("Auto Reply 🔙", callback_data="auto_reply")]])
-            )
 
 async def main():
     await pyro.start()
