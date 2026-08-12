@@ -528,35 +528,23 @@ async def run_broadcast(client, uid, account_ids=None):
 
                         try:
                             varied_caption = vary_message(active_caption or "")
-
-                            # Convert saved entities to Telethon format (preserves bold/italic/etc.)
                             tl_entities = pyrogram_entities_to_telethon(active_entities_data)
 
-                            # ── Send / Forward ─────────────────────────────────────────────────
-                            if active_media and active_ad_type in ("photo", "both"):
-                                # Photo: always send_file (can't forward photos this way reliably)
+                            # ── Send / Forward ──────────────────────────────────────────────────
+                            if active_ad_type == "forward" and active_from_chat and active_message_id:
+                                # FORWARD MODE: server-side forward — 100% preserves premium emojis
+                                await tg_client.forward_messages(
+                                    entity=gid,
+                                    messages=active_message_id,
+                                    from_peer=active_from_chat,
+                                    drop_author=True,
+                                )
+                            elif active_media and active_ad_type in ("photo", "both"):
                                 await tg_client.send_file(
                                     gid, file=active_media, caption=varied_caption,
                                     formatting_entities=tl_entities
                                 )
-                            elif active_ad_type == "text" and active_from_chat and active_message_id:
-                                # Text with a saved origin → FORWARD (100% preserves premium emojis)
-                                try:
-                                    await tg_client.forward_messages(
-                                        entity=gid,
-                                        messages=active_message_id,
-                                        from_peer=active_from_chat,
-                                        drop_author=True,  # hides "Forwarded from" header
-                                    )
-                                except Exception as fwd_err:
-                                    # Forward failed (message deleted / no access) → fall back to entity send
-                                    logger.warning(f"Forward failed for {phone}→{gid}: {fwd_err} — using entity send")
-                                    await tg_client.send_message(
-                                        gid, varied_caption,
-                                        formatting_entities=tl_entities
-                                    )
                             elif active_caption:
-                                # Text without saved origin (old ad) → entity send
                                 await tg_client.send_message(
                                     gid, varied_caption,
                                     formatting_entities=tl_entities
@@ -571,6 +559,7 @@ async def run_broadcast(client, uid, account_ids=None):
                                     gid, varied_caption,
                                     formatting_entities=tl_entities
                                 )
+
                                 
                             sent_count += 1
                             db.increment_broadcast_stats(uid, True)
@@ -1108,8 +1097,28 @@ async def set_msg(client, cb):
             [InlineKeyboardButton("🖼️ Image Only", callback_data="adtype_photo")],
             [InlineKeyboardButton("📝 Text Only", callback_data="adtype_text")],
             [InlineKeyboardButton("🖼️📝 Image + Text (Both)", callback_data="adtype_both")],
+            [InlineKeyboardButton("📨 Forward Mode (Premium Emojis)", callback_data="adtype_forward")],
             [InlineKeyboardButton("Back 🔙", callback_data="menu_main")]
         ])
+    )
+
+
+@pyro.on_callback_query(filters.regex("^adtype_forward$"))
+async def adtype_forward(client, cb):
+    uid = cb.from_user.id
+    db.set_user_state(uid, "waiting_forward_ad")
+    await cb.message.edit_caption(
+        caption=(
+            "<blockquote><b>╰_╯ FORWARD MODE 📨</b></blockquote>\n\n"
+            "<b>How it works:</b>\n"
+            "1️⃣ Save your premium emoji ad in your <b>Telegram Saved Messages</b>\n"
+            "2️⃣ Open Saved Messages → long press the message → <b>Forward</b> it here\n\n"
+            "Or forward any message from <b>any channel/group</b> you own.\n\n"
+            "<i>The bot will broadcast by forwarding that exact message — \n"
+            "premium emojis, formatting, everything preserved ✅</i>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb([[InlineKeyboardButton("Cancel 🔙", callback_data="set_msg")]])
     )
 
 
@@ -1831,7 +1840,70 @@ async def handle_text_message(client, m):
                           reply_markup=kb([[InlineKeyboardButton("Back", callback_data="auto_reply_menu")]]))
         return
 
-    # ── Ad text message setting ──────────────────────────────────────────────
+    # ── Forward-mode ad: user forwards a message, bot saves origin ────────────────
+    if state == "waiting_forward_ad":
+        try:
+            # Check if this message is a forward
+            fwd = m.forward_origin if hasattr(m, 'forward_origin') and m.forward_origin else None
+            fwd_chat_id  = None
+            fwd_msg_id   = None
+
+            if fwd:
+                # Pyrogram v2 forward_origin object
+                if hasattr(fwd, 'chat') and fwd.chat:
+                    fwd_chat_id = fwd.chat.id
+                elif hasattr(fwd, 'sender_chat') and fwd.sender_chat:
+                    fwd_chat_id = fwd.sender_chat.id
+                if hasattr(fwd, 'message_id'):
+                    fwd_msg_id = fwd.message_id
+            elif m.forward_from_chat:
+                # Legacy Pyrogram v1 fields
+                fwd_chat_id = m.forward_from_chat.id
+                fwd_msg_id  = m.forward_from_message_id
+
+            if not fwd_chat_id or not fwd_msg_id:
+                await m.reply(
+                    "<blockquote><b>❌ That's not a forwarded message!</b></blockquote>\n\n"
+                    "Please <b>forward</b> your ad message here.\n"
+                    "<i>Open Saved Messages → long press message → Forward → select this bot.</i>",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb([[InlineKeyboardButton("Try Again", callback_data="adtype_forward"),
+                                      InlineKeyboardButton("Cancel", callback_data="set_msg")]])
+                )
+                return
+
+            # Save as 'forward' ad type with origin info
+            existing_text = m.text or m.caption or ""
+            db.add_user_ad_message(
+                uid, existing_text, datetime.now(),
+                photo_path=None, ad_type="forward",
+                entities=[],
+                from_chat_id=int(fwd_chat_id),
+                message_id=int(fwd_msg_id)
+            )
+            db.set_user_state(uid, "")
+            logger.info(f"Forward-mode ad set for {uid}: from_chat={fwd_chat_id} msg_id={fwd_msg_id}")
+            await m.reply(
+                "<blockquote><b>╰_╯ FORWARD AD SET! ✅</b></blockquote>\n\n"
+                f"Source chat: <code>{fwd_chat_id}</code>\n"
+                f"Message ID: <code>{fwd_msg_id}</code>\n\n"
+                "<b>Broadcasting will forward this exact message</b> —\n"
+                "premium emojis, stickers, and all formatting preserved! 🚀",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb([[InlineKeyboardButton("Dashboard 🚪", callback_data="menu_main")]])
+            )
+            await send_dm_log(uid, f"<b>📨 Forward-mode ad set:</b> chat <code>{fwd_chat_id}</code> msg <code>{fwd_msg_id}</code>")
+        except Exception as e:
+            logger.error(f"Failed to set forward-mode ad for {uid}: {e}")
+            db.set_user_state(uid, "")
+            await m.reply(
+                f"<b>❌ Error:</b> {str(e)}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb([[InlineKeyboardButton("Back", callback_data="set_msg")]])
+            )
+        return
+
+    # ── Ad text message setting ─────────────────────────────────────────────────
     if state in ("waiting_broadcast_msg", "waiting_broadcast_msg_text"):
         try:
             # Determine ad_type from state
