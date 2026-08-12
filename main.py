@@ -493,7 +493,7 @@ async def run_broadcast(client, uid, account_ids=None):
                         active_caption = fallback_text
                         active_media = fallback_photo
 
-                if not active_caption and not active_media:
+                if active_ad_type != "forward" and not active_caption and not active_media:
                     await client.send_message(uid, "No ad message or photo found. Please set an ad message/photo first.", parse_mode=ParseMode.HTML)
                     db.set_broadcast_state(uid, running=False)
                     break
