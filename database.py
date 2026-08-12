@@ -82,6 +82,7 @@ class EnhancedDatabaseManager:
                 ensure_index(self.db.temp_data, [("user_id", pymongo.ASCENDING), ("key", pymongo.ASCENDING)], unique=True)
                 ensure_index(self.db.logger_status, "user_id", unique=True)
                 ensure_index(self.db.logger_failures, "user_id")
+                ensure_index(self.db.auto_replies, "user_id", unique=True)
                 return
             except ConnectionFailure as e:
                 logger.error(f"MongoDB connection attempt {attempt + 1}/{max_retries} failed: {e}")
@@ -286,25 +287,64 @@ class EnhancedDatabaseManager:
             logger.error(f"Failed to get ad messages for {user_id}: {e}")
             return []
 
-    def add_user_ad_message(self, user_id, message, created_at, photo_path=None):
-        """Add an ad message for a user, with optional photo_path."""
+    def add_user_ad_message(self, user_id, message, created_at, photo_path=None, ad_type="text"):
+        """Add an ad message for a user, with optional photo_path and ad_type.
+        ad_type can be: 'text', 'photo', 'both'
+        """
         try:
             update_data = {
                 "message": message,
                 "created_at": created_at,
-                "updated_at": datetime.now()
+                "updated_at": datetime.now(),
+                "ad_type": ad_type
             }
             if photo_path is not None:
                 update_data["photo_path"] = photo_path
-            
+            else:
+                # If no photo_path provided, explicitly unset it in DB
+                self.db.ad_messages.update_one(
+                    {"user_id": user_id},
+                    {"$unset": {"photo_path": ""}},
+                    upsert=False
+                )
+
             self.db.ad_messages.update_one(
                 {"user_id": user_id},
                 {"$set": update_data},
                 upsert=True
             )
-            logger.info(f"Ad message added for user {user_id} (photo_path={photo_path})")
+            logger.info(f"Ad message added for user {user_id} (ad_type={ad_type}, photo_path={photo_path})")
         except Exception as e:
             logger.error(f"Failed to add ad message for {user_id}: {e}")
+            raise
+
+    def get_auto_reply(self, user_id):
+        """Get the auto-reply message for a user."""
+        try:
+            doc = self.db.auto_replies.find_one({"user_id": user_id}, {"message": 1, "enabled": 1})
+            if doc:
+                return {"message": doc.get("message", ""), "enabled": doc.get("enabled", False)}
+            return {"message": "", "enabled": False}
+        except Exception as e:
+            logger.error(f"Failed to get auto reply for {user_id}: {e}")
+            return {"message": "", "enabled": False}
+
+    def set_auto_reply(self, user_id, message=None, enabled=None):
+        """Set/update the auto-reply message and/or enabled state for a user."""
+        try:
+            update = {"updated_at": datetime.now()}
+            if message is not None:
+                update["message"] = message
+            if enabled is not None:
+                update["enabled"] = enabled
+            self.db.auto_replies.update_one(
+                {"user_id": user_id},
+                {"$set": update},
+                upsert=True
+            )
+            logger.info(f"Auto reply updated for {user_id}: enabled={enabled}")
+        except Exception as e:
+            logger.error(f"Failed to set auto reply for {user_id}: {e}")
             raise
 
     def get_user_ad_delay(self, user_id):
