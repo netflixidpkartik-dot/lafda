@@ -1759,16 +1759,19 @@ async def handle_group_link(client, m):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FORWARD-AD HANDLER — catches ANY message type when waiting for a forwarded ad
-# Must be registered BEFORE the photo/text handlers so it takes priority
+# FORWARD-AD HANDLER — runs in group -1 so it has priority over all group 0
+# handlers (photo, text, etc.). If state is NOT waiting_forward_ad it returns
+# immediately and Pyrogram falls through to group 0 handlers as normal.
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pyro.on_message(filters.private & ~filters.command(["start", "bd", "me", "stats", "stop"]))
+@pyro.on_message(filters.private & ~filters.command(["start", "bd", "me", "stats", "stop"]), group=-1)
 async def handle_forward_ad(client, m):
     uid = m.from_user.id
     state = db.get_user_state(uid)
     if state != "waiting_forward_ad":
-        return  # not our turn — let other handlers process it
+        return  # not our state — fall through to group 0 (photo/text handlers)
+
+    from pyrogram import StopPropagation
 
     fwd_chat_id = None
     fwd_msg_id  = None
@@ -1777,9 +1780,7 @@ async def handle_forward_ad(client, m):
     fwd_origin = getattr(m, "forward_origin", None)
     if fwd_origin:
         origin_type = type(fwd_origin).__name__
-        logger.info(f"Forward origin type for {uid}: {origin_type} | attrs: {dir(fwd_origin)}")
-
-        # MessageOriginChannel → has .chat and .message_id
+        logger.info(f"Forward origin type for {uid}: {origin_type}")
         if hasattr(fwd_origin, "message_id") and fwd_origin.message_id:
             fwd_msg_id = int(fwd_origin.message_id)
             if hasattr(fwd_origin, "chat") and fwd_origin.chat:
@@ -1799,12 +1800,12 @@ async def handle_forward_ad(client, m):
             "<b>✅ How to fix:</b>\n"
             "1️⃣ Post your premium emoji ad to a <b>Telegram channel you own</b>\n"
             "2️⃣ Open that channel post → tap <b>Share → Forward</b> → select this bot\n\n"
-            "<i>Only channel/group forwards expose the message ID needed for broadcasting.</i>",
+            "<i>Only channel post forwards expose the message ID needed for broadcasting.</i>",
             parse_mode=ParseMode.HTML,
             reply_markup=kb([[InlineKeyboardButton("Try Again 🔄", callback_data="adtype_forward"),
                               InlineKeyboardButton("Cancel", callback_data="set_msg")]])
         )
-        return
+        raise StopPropagation
 
     try:
         db.add_user_ad_message(
@@ -1831,6 +1832,7 @@ async def handle_forward_ad(client, m):
         db.set_user_state(uid, "")
         await m.reply(f"<b>❌ Error:</b> {str(e)}", parse_mode=ParseMode.HTML,
                       reply_markup=kb([[InlineKeyboardButton("Back", callback_data="set_msg")]]))
+    raise StopPropagation
 
 
 @pyro.on_message(filters.photo & filters.private)
