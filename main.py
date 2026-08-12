@@ -275,22 +275,30 @@ async def get_channel_ad_message(tg_client):
         return None, None
 
 
-async def run_broadcast(client, uid):
+async def run_broadcast(client, uid, account_ids=None):
+    """
+    Run the broadcast loop.
+    account_ids: list of str account _id values to use, or None to use all.
+    """
     try:
         sent_count = 0
         failed_count = 0
         cycle_count = 0
 
-        # msg is fetched fresh from the channel each cycle (set below)
-        # Fallback to DB if channel fetch fails
         db_msgs = db.get_user_ad_messages(uid)
         fallback_text = db_msgs[0].get("message") if db_msgs else None
         fallback_photo = db_msgs[0].get("photo_path") if db_msgs else None
-        # ad_type: 'text', 'photo', 'both'
         fallback_ad_type = db_msgs[0].get("ad_type", "text") if db_msgs else "text"
 
         delay = db.get_user_ad_delay(uid)
-        accounts = db.get_user_accounts(uid)
+        all_accounts = db.get_user_accounts(uid)
+
+        # Filter to selected accounts if specified
+        if account_ids:
+            accounts = [a for a in all_accounts if str(a['_id']) in account_ids]
+        else:
+            accounts = all_accounts
+
         target_groups = db.get_target_groups(uid)
         group_ids = [g['group_id'] for g in target_groups] if target_groups else None
 
@@ -755,19 +763,24 @@ async def menu_main(client, cb):
         auto_reply_data = db.get_auto_reply(uid)
         ar_status = "ON ✅" if auto_reply_data.get("enabled") else "OFF ❌"
 
+        selected_acc_ids = db.get_selected_broadcast_accounts(uid)
+        if selected_acc_ids is None:
+            bcast_acc_label = f"All ({accounts_count})"
+        elif selected_acc_ids:
+            bcast_acc_label = f"{len(selected_acc_ids)} of {accounts_count} selected"
+        else:
+            bcast_acc_label = f"None selected"
+
         dashboard_caption = (
             f"<blockquote><b>╰_╯ ADS DASHBOARD</b></blockquote>\n\n"
-            f"•Hosted Accounts: <code>{accounts_count}</code>\n"
+            f"•Hosted Accounts: <code>{accounts_count}</code> (Unlimited ♾️)\n"
+            f"•Broadcasting With: <code>{bcast_acc_label}</code>\n"
             f"•Ad Message: {ad_msg_status}\n"
             f"•Cycle Interval: {current_delay}s\n"
             f"•Advertising Status: <b>{broadcast_status}</b>\n"
             f"•Auto Reply: <b>{ar_status}</b>\n\n"
             "<blockquote>╰_╯Choose an action below to continue </blockquote>"
         )
-        
-        # Auto-reply status
-        auto_reply = db.get_auto_reply(uid)
-        ar_status = "ON ✅" if auto_reply.get("enabled") else "OFF ❌"
 
         menu = [
             [InlineKeyboardButton("Add Accounts", callback_data="host_account"),
@@ -1065,19 +1078,54 @@ async def quick_delay(client, cb):
     await send_dm_log(uid, f"<b> Broadcast interval updated:</b> {delay} seconds ({mode})")
     db.set_user_state(uid, "")
 
-@pyro.on_callback_query(filters.regex("start_broadcast"))
+# ─────────────────────────────────────────────────────────────────────────────
+# ACCOUNT SELECTION + BROADCAST CONTROLS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_account_selection_menu(accounts, selected_ids):
+    """Build inline keyboard rows for account selection."""
+    buttons = []
+    for acc in accounts:
+        acc_id = str(acc['_id'])
+        phone = acc['phone_number']
+        is_on = acc_id in selected_ids
+        status_icon = "✅" if is_on else "⬜"
+        buttons.append([
+            InlineKeyboardButton(
+                f"{status_icon} {phone}",
+                callback_data=f"toggle_bcast_acc_{acc_id}"
+            )
+        ])
+
+    # Control buttons
+    has_selection = bool(selected_ids)
+    buttons.append([
+        InlineKeyboardButton("▶️ Start Selected" if has_selection else "(Select accounts above)",
+                             callback_data="start_bcast_selected" if has_selection else "noop_no_selection"),
+    ])
+    buttons.append([
+        InlineKeyboardButton("🚀 Start ALL Accounts", callback_data="start_bcast_all")
+    ])
+    buttons.append([
+        InlineKeyboardButton("Back 🔙", callback_data="menu_main")
+    ])
+    return buttons
+
+
+@pyro.on_callback_query(filters.regex("^start_broadcast$"))
 async def start_broadcast(client, cb):
+    """Show account-selection screen before starting broadcast."""
     uid = cb.from_user.id
     try:
         if db.get_broadcast_state(uid).get("running"):
             await cb.answer("╰_╯Broadcast already running!", show_alert=True)
             return
-        
+
         accounts = db.get_user_accounts(uid)
         if not accounts:
             await cb.answer("╰_╯Baka! No accounts hosted yet!", show_alert=True)
             return
-        
+
         if not db.get_logger_status(uid):
             try:
                 await cb.message.edit_caption(
@@ -1094,59 +1142,151 @@ async def start_broadcast(client, cb):
                 logger.error(f"Failed to edit logger bot message for {uid}: {e}")
                 await cb.answer("╰_╯Error: Please try again.", show_alert=True)
             return
-        
-        current_task = user_tasks.get(uid)
-        if current_task:
-            try:
-                current_task.cancel()
-                await current_task
-                logger.info(f"Cancelled previous broadcast for {uid}")
-            except Exception as e:
-                logger.error(f"Failed to cancel previous broadcast task for {uid}: {e}")
-            finally:
-                if uid in user_tasks:
-                    del user_tasks[uid]
-        
-        task = asyncio.create_task(run_broadcast(client, uid))
-        user_tasks[uid] = task
-        db.set_broadcast_state(uid, running=True)
-        
-        try:
-            await cb.message.edit_caption(
-                caption="""<blockquote> <b>╰_╯BROADCAST ON!</b></blockquote>\n\n"""
-                        """Your ads are now being sent to the groups your account is joined in.\n"""
-                        f"""Logs will be sent to your DM via @{config.LOGGER_BOT_USERNAME.lstrip('@')}.</i>""",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([[InlineKeyboardButton("Back", callback_data="menu_main")]])
-            )
-            await cb.answer("Broadcast started! ▶️", show_alert=True)
-            await send_dm_log(uid, "<b>🚀 Broadcast started! Logs will come here</b>")
-            logger.info(f"Broadcast started via callback for user {uid}")
-        except Exception as e:
-            logger.error(f"Failed to edit BROADCAST ON message for {uid}: {e}")
-            try:
-                await client.send_photo(
-                    chat_id=uid,
-                    photo=config.START_IMAGE,
-                    caption="""<blockquote><b>╰_╯BROADCAST ON! </b></blockquote>\n\n"""
-                            """Your ads are now being sent to the groups your account is joined in.\n"""
-                            f"""Logs will be sent to your DM via @{config.LOGGER_BOT_USERNAME.lstrip('@')}.""",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=kb([[InlineKeyboardButton("Back 🔙", callback_data="menu_main")]])
-                )
-                await cb.answer("Broadcast started! 🚀", show_alert=True)
-                await send_dm_log(uid, "<b>Broadcast started! Logs will come here</b>")
-                logger.info(f"Broadcast started via callback for user {uid} (fallback send)")
-            except Exception as e2:
-                logger.error(f"Failed to send fallback BROADCAST ON message for {uid}: {e2}")
-                await cb.answer("Error starting broadcast. Please try again. 😔", show_alert=True)
-                await send_dm_log(uid, f"<b>❌ Failed to start broadcast:</b> {str(e2)} 😔")
+
+        # Load previously-selected accounts (defaults to empty = none pre-selected)
+        prev_selected = db.get_selected_broadcast_accounts(uid) or []
+        selected_ids = set(prev_selected)
+
+        menu = _build_account_selection_menu(accounts, selected_ids)
+        count = len(accounts)
+        caption = (
+            f"<blockquote><b>╰_╯ SELECT ACCOUNTS TO BROADCAST</b></blockquote>\n\n"
+            f"<b>{count}</b> account(s) available.\n\n"
+            "Tap an account to toggle it <b>ON ✅</b> or <b>OFF ⬜</b>\n"
+            "Then tap <b>Start Selected</b> or <b>Start ALL</b>."
+        )
+        await cb.message.edit_caption(
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb(menu)
+        )
     except Exception as e:
         logger.error(f"Error in start_broadcast for {uid}: {e}")
-        await cb.answer("Error starting broadcast. Contact support. 😔", show_alert=True)
-        await send_dm_log(uid, f"<b>❌ Failed to start broadcast:</b> {str(e)} 😔")
+        await cb.answer("Error. Try again.", show_alert=True)
 
-@pyro.on_callback_query(filters.regex("stop_broadcast"))
+
+@pyro.on_callback_query(filters.regex("^toggle_bcast_acc_"))
+async def toggle_bcast_acc(client, cb):
+    """Toggle a single account in/out of the broadcast selection."""
+    uid = cb.from_user.id
+    acc_id = cb.data.replace("toggle_bcast_acc_", "")
+
+    prev = db.get_selected_broadcast_accounts(uid) or []
+    selected = set(prev)
+
+    if acc_id in selected:
+        selected.discard(acc_id)
+    else:
+        selected.add(acc_id)
+
+    db.set_selected_broadcast_accounts(uid, list(selected))
+
+    accounts = db.get_user_accounts(uid)
+    menu = _build_account_selection_menu(accounts, selected)
+    count = len(accounts)
+    caption = (
+        f"<blockquote><b>╰_╯ SELECT ACCOUNTS TO BROADCAST</b></blockquote>\n\n"
+        f"<b>{count}</b> account(s) available. <b>{len(selected)}</b> selected.\n\n"
+        "Tap an account to toggle it <b>ON ✅</b> or <b>OFF ⬜</b>\n"
+        "Then tap <b>Start Selected</b> or <b>Start ALL</b>."
+    )
+    try:
+        await cb.message.edit_caption(
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb(menu)
+        )
+    except Exception:
+        pass  # Message unchanged, ignore
+    await cb.answer()
+
+
+@pyro.on_callback_query(filters.regex("^noop_no_selection$"))
+async def noop_no_selection(client, cb):
+    await cb.answer("Select at least one account first!", show_alert=True)
+
+
+async def _launch_broadcast(client, uid, account_ids=None):
+    """Internal helper: cancel any existing task and launch a new broadcast."""
+    current_task = user_tasks.get(uid)
+    if current_task:
+        try:
+            current_task.cancel()
+            await current_task
+        except Exception:
+            pass
+        finally:
+            user_tasks.pop(uid, None)
+
+    task = asyncio.create_task(run_broadcast(client, uid, account_ids=account_ids))
+    user_tasks[uid] = task
+    db.set_broadcast_state(uid, running=True)
+
+
+@pyro.on_callback_query(filters.regex("^start_bcast_selected$"))
+async def start_bcast_selected(client, cb):
+    """Start broadcast using only the selected accounts."""
+    uid = cb.from_user.id
+    selected = db.get_selected_broadcast_accounts(uid) or []
+    if not selected:
+        await cb.answer("Select at least one account first!", show_alert=True)
+        return
+
+    accounts = db.get_user_accounts(uid)
+    selected_phones = [
+        acc['phone_number'] for acc in accounts if str(acc['_id']) in selected
+    ]
+    await _launch_broadcast(client, uid, account_ids=selected)
+
+    label = ", ".join(selected_phones[:3])
+    if len(selected_phones) > 3:
+        label += f" +{len(selected_phones) - 3} more"
+
+    try:
+        await cb.message.edit_caption(
+            caption=f"<blockquote><b>╰_╯BROADCAST ON! 🚀</b></blockquote>\n\n"
+                    f"Broadcasting with <b>{len(selected)}</b> account(s):\n"
+                    f"<code>{label}</code>\n\n"
+                    f"Logs → @{config.LOGGER_BOT_USERNAME.lstrip('@')}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("Back 🔙", callback_data="menu_main")]])
+        )
+    except Exception as e:
+        logger.error(f"Failed to edit caption for start_bcast_selected {uid}: {e}")
+    await cb.answer("Broadcast started! ▶️", show_alert=True)
+    await send_dm_log(uid, f"<b>🚀 Broadcast started</b> with <b>{len(selected)}</b> selected account(s): {label}")
+    logger.info(f"Broadcast started for {uid} with selected accounts: {selected}")
+
+
+@pyro.on_callback_query(filters.regex("^start_bcast_all$"))
+async def start_bcast_all(client, cb):
+    """Start broadcast using ALL hosted accounts."""
+    uid = cb.from_user.id
+    accounts = db.get_user_accounts(uid)
+    if not accounts:
+        await cb.answer("No accounts hosted!", show_alert=True)
+        return
+
+    # Clear selection — None means 'all'
+    db.set_selected_broadcast_accounts(uid, None)
+    await _launch_broadcast(client, uid, account_ids=None)
+
+    try:
+        await cb.message.edit_caption(
+            caption=f"<blockquote><b>╰_╯BROADCAST ON! 🚀</b></blockquote>\n\n"
+                    f"Broadcasting with <b>ALL {len(accounts)}</b> account(s).\n\n"
+                    f"Logs → @{config.LOGGER_BOT_USERNAME.lstrip('@')}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("Back 🔙", callback_data="menu_main")]])
+        )
+    except Exception as e:
+        logger.error(f"Failed to edit caption for start_bcast_all {uid}: {e}")
+    await cb.answer("All accounts broadcasting! 🚀", show_alert=True)
+    await send_dm_log(uid, f"<b>🚀 Broadcast started with ALL {len(accounts)} accounts</b>")
+    logger.info(f"Broadcast started for {uid} with ALL accounts")
+
+
+@pyro.on_callback_query(filters.regex("^stop_broadcast$"))
 async def stop_broadcast(client, cb):
     uid = cb.from_user.id
     stopped = await stop_broadcast_task(uid)
@@ -1421,8 +1561,8 @@ async def start(client, m):
     first_name = m.from_user.first_name or "User"
     
     db.create_user(uid, username, first_name)
-    if is_owner(uid):
-        db.db.users.update_one({"user_id": uid}, {"$set": {"accounts_limit": "unlimited"}})
+    # Ensure all users have unlimited account slots (migrates existing users too)
+    db.db.users.update_one({"user_id": uid}, {"$set": {"accounts_limit": "unlimited"}})
     db.update_user_last_interaction(uid)
     
     if config.ENABLE_FORCE_JOIN:
