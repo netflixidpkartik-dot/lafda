@@ -1787,6 +1787,12 @@ async def handle_text_message(client, m):
             )
             await send_dm_log(uid, f"<b>❌ Failed to set broadcast interval:</b> {str(e)}")
 
+    # ── Telethon account login states ───────────────────────────────────────────
+    elif state == "telethon_wait_phone":
+        await _handle_telethon_phone(uid, text, m)
+    elif state == "telethon_wait_password":
+        await _handle_telethon_password(uid, text, m)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AUTO-REPLY CALLBACKS
@@ -2017,19 +2023,6 @@ async def _handle_telethon_password(uid, text, m):
     finally:
         await tg.disconnect()
 
-
-# Wire telethon phone/password states into handle_text_message
-@pyro.on_message(filters.text & filters.private & ~filters.command(["start", "bd", "me", "stats", "stop"]))
-async def handle_telethon_states(client, m):
-    """Handles telethon_wait_phone and telethon_wait_password states."""
-    uid = m.from_user.id
-    state = db.get_user_state(uid)
-    text = m.text.strip()
-
-    if state == "telethon_wait_phone":
-        await _handle_telethon_phone(uid, text, m)
-    elif state == "telethon_wait_password":
-        await _handle_telethon_password(uid, text, m)
 
 
 async def main():
