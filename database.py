@@ -83,6 +83,7 @@ class EnhancedDatabaseManager:
                 ensure_index(self.db.logger_status, "user_id", unique=True)
                 ensure_index(self.db.logger_failures, "user_id")
                 ensure_index(self.db.auto_replies, "user_id", unique=True)
+                ensure_index(self.db.selected_broadcast_accounts, "user_id", unique=True)
                 return
             except ConnectionFailure as e:
                 logger.error(f"MongoDB connection attempt {attempt + 1}/{max_retries} failed: {e}")
@@ -119,6 +120,30 @@ class EnhancedDatabaseManager:
         except Exception as e:
             logger.error(f"Failed to load persistent globals: {e}")
 
+    def get_selected_broadcast_accounts(self, user_id):
+        """Get account IDs selected by user for broadcasting. None means 'all'."""
+        try:
+            doc = self.db.selected_broadcast_accounts.find_one({"user_id": user_id})
+            if doc:
+                return doc.get("account_ids")  # None = all, list of str = specific
+            return None  # default: use all
+        except Exception as e:
+            logger.error(f"Failed to get selected broadcast accounts for {user_id}: {e}")
+            return None
+
+    def set_selected_broadcast_accounts(self, user_id, account_ids):
+        """Set account IDs to use for broadcasting. Pass None to use all accounts."""
+        try:
+            self.db.selected_broadcast_accounts.update_one(
+                {"user_id": user_id},
+                {"$set": {"account_ids": account_ids, "updated_at": datetime.now()}},
+                upsert=True
+            )
+            logger.info(f"Selected broadcast accounts set for {user_id}: {account_ids}")
+        except Exception as e:
+            logger.error(f"Failed to set selected broadcast accounts for {user_id}: {e}")
+            raise
+
     def create_user(self, user_id, username, first_name):
         """Create or update a user with fixed 5-account limit and vouch tracking."""
         try:
@@ -132,7 +157,7 @@ class EnhancedDatabaseManager:
                     },
                     "$setOnInsert": {
                         "created_at": datetime.now(),
-                        "accounts_limit": 5,
+                        "accounts_limit": "unlimited",
                         "has_joined_vouch": False,
                         "state": "",
                         "user_id": user_id  # Explicitly include user_id in schema
