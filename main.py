@@ -46,25 +46,33 @@ def validate_phone_number(phone):
 
 
 def entities_to_dict(entities):
-    """Serialize Pyrogram message entities to a JSON-safe list of dicts."""
+    """Serialize Pyrogram message entities to plain-Python dicts safe for MongoDB."""
     if not entities:
         return []
     result = []
     for e in entities:
         try:
-            etype = e.type.value if hasattr(e.type, 'value') else str(e.type)
+            # Always cast to plain str — Pyrogram enums are NOT BSON-serializable
+            if hasattr(e, 'type'):
+                raw_type = e.type
+                etype = raw_type.value if hasattr(raw_type, 'value') else str(raw_type)
+                etype = str(etype)   # guarantee plain str
+            else:
+                continue            # skip unknown entity shapes
+
             d = {
                 "type": etype,
-                "offset": e.offset,
-                "length": e.length,
+                "offset": int(e.offset),   # guarantee plain int
+                "length": int(e.length),   # guarantee plain int
             }
-            if hasattr(e, 'custom_emoji_id') and e.custom_emoji_id:
+            # custom_emoji_id can be a huge int — always store as str
+            if hasattr(e, 'custom_emoji_id') and e.custom_emoji_id is not None:
                 d["custom_emoji_id"] = str(e.custom_emoji_id)
             if hasattr(e, 'url') and e.url:
-                d["url"] = e.url
+                d["url"] = str(e.url)
             result.append(d)
-        except Exception:
-            pass
+        except Exception as ex:
+            logger.warning(f"Skipped un-serializable entity {e}: {ex}")
     return result
 
 
